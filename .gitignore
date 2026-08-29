@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+diagnose/
+
+# Die Daten liegen neben dem Skript -- sie gehoeren nicht ins Repository.
+zugang
+cache/
+ausblenden
+csv-exports/
+fahrzeuge
