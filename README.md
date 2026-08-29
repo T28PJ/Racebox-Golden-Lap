@@ -285,3 +285,21 @@ Wie die Daten geholt werden, wie die Schnittstelle von racebox.pro
 aussieht, woher die Runden kommen und was aus welchem Grund verworfen wird
 — das steht in [`TECHNIK.md`](TECHNIK.md). Für die Benutzung braucht man es
 nicht; wer etwas ändern will, liest es vorher.
+
+## Lizenz
+
+Der Code steht unter der [GNU General Public License v3.0](LICENSE).
+Benutzen, ändern und weitergeben ist ausdrücklich erwünscht — wer eine
+geänderte Fassung weitergibt, gibt den Quelltext dazu.
+
+## Kein Zusammenhang mit RaceBox
+
+Dieses Werkzeug ist privat entstanden. Es stammt nicht von RaceBox
+Motorsport LLC, wird von dort nicht unterstützt und nicht geprüft. Der Name
+RaceBox gehört seinen Eigentümern und steht hier nur, um zu sagen, wessen
+Daten das Werkzeug liest.
+
+Was es tut, tut es mit **deinem** Konto und **deinen** Zugangsdaten: Es
+meldet sich so an, wie du dich im Browser anmeldest, und liest die
+Aufzeichnungen, die dir gehören. Fremde Daten holt es nicht, und es lädt
+nichts hoch.

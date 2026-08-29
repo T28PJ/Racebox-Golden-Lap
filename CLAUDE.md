@@ -14,6 +14,7 @@ Runden kommen und was aus welchem Grund verworfen wird, steht in
 | `README.md` | was das Werkzeug tut und wie man es bedient |
 | `TECHNIK.md` | die Schnittstelle, die Rundenquelle, was verworfen wird und warum |
 | `IDEEN.md` | was noch nicht gebaut ist, aber gedacht — vor neuen Vorhaben lesen |
+| `LICENSE` | GNU General Public License v3.0 |
 
 ## Feste Regeln
 

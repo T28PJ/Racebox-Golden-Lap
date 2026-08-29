@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+#
+# Racebox Golden Lap -- Copyright (C) 2026 T28PJ
+#
+# Dieses Programm ist freie Software: Du darfst es weitergeben und
+# veraendern unter den Bedingungen der GNU General Public License,
+# Version 3, wie von der Free Software Foundation veroeffentlicht.
+# Weitergegeben wird es in der Hoffnung, dass es nuetzlich ist, aber
+# OHNE JEDE GEWAEHRLEISTUNG. Einzelheiten stehen in der Datei LICENSE
+# und unter <https://www.gnu.org/licenses/>.
 """Racebox Golden Lap -- Sektorzeiten ueber Sessions und Fahrtage hinweg.
 
 Die RaceBox-App und racebox.pro zeigen Sektorzeiten immer nur innerhalb
