@@ -228,7 +228,7 @@ das waren die Indizes. Was sich nicht eindeutig als Zeit ausweist, wird
 python3 selbsttest.py
 ```
 
-564 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
+582 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
 — mit Anmeldung, Cookies, Blättern, Fahrzeugfilter und einem 5 MB großen
 Export. Geprüft wird beobachtbares Verhalten: welche Felder rausgehen, was
 im Cache landet, was bei Fehlern passiert.

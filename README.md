@@ -134,11 +134,41 @@ schärfere Frage als die Golden Lap: Wer Sektoren aus vier Fahrtagen
 zusammensetzt, bekommt eine Zahl, die nie jemand fährt — die Turn-Zeile
 sagt, was an einem Nachmittag möglich war.
 
+Unter der Detailansicht bietet die Weiter-Zeile ein `s` an:
+
+```
+Weiter mit Enter, s = Statistik zu dieser Auswahl, q = Ende ... s
+```
+
+Das zeigt [Alles Gefahrene](#alles-gefahrene) für genau diese Strecke und
+dieses Fahrzeug — Kilometer, Stunden, Schnitt, Höchstwerte. Auf Anfrage
+und nicht von selbst, damit die Detailansicht nicht länger wird, als sie
+sein muss.
+
 ## Alles Gefahrene
 
 Die zweite Frage neben der schnellsten Runde: Was ist da eigentlich
 zusammengekommen? `--statistik` beantwortet sie, im Menü führt `s` dorthin,
-und `--strecke` schränkt auch hier ein.
+und `--strecke` schränkt auch hier ein. Nach der Detailansicht führt `s` zu
+derselben Ansicht für die gewählte Strecke und das gewählte Fahrzeug:
+
+```
+==================================================================================
+Alles Gefahrene -- Talkurs / Grand Prix -- Yamaha MT-07
+==================================================================================
+33 Turns an 7 Fahrtagen, 312 Runden auf 1 Strecke mit 1 Fahrzeug
+
+  Insgesamt
+    aufgezeichnet      1502 km   11:40:12 h  1050940 Messpunkte
+    gefahren           1498 km    9:35:07 h  Schnitt 156 km/h
+    ...
+```
+
+Die Überschrift nennt, worauf die Zahlen eingeschränkt sind. Die Tabellen
+je Fahrzeug und je Strecke stehen dort nur, wenn sie mehr als eine Zeile
+hätten — wer Enter statt eines Fahrzeugs wählt, bekommt die je Fahrzeug.
+Gezählt wird auch hier alles Aufgezeichnete dieser Strecke, auch Sessions
+mit einer abweichenden Sektoreinteilung, die die Detailansicht herauslässt.
 
 ```
 ==================================================================================

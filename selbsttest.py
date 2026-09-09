@@ -2267,6 +2267,108 @@ def test_statistik_ueber_die_bedienung():
         shutil.rmtree(ordner)
 
 
+def test_statistik_zur_auswahl():
+    """Nach Strecke und Fahrzeug fuehrt `s` zur Statistik derselben Auswahl.
+
+    Sie kommt auf Anfrage und nicht von selbst: Die Detailansicht ist lang
+    genug. Und sie zaehlt, was die Statistik immer zaehlt -- auch Sessions
+    mit abweichender Sektoreinteilung, die die Detailansicht herauslaesst.
+    """
+    echtes_input = builtins.input
+    gefragt = []
+
+    def antworten(*eingaben):
+        folge = iter(eingaben)
+
+        def f(frage=''):
+            gefragt.append(frage)
+            return next(folge)
+        return f
+
+    def lauf(strecken, ausgeblendet, *eingaben):
+        del gefragt[:]
+        builtins.input = antworten(*eingaben)
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            S.schleife(strecken, ausgeblendet, 3)
+        text = puffer.getvalue()
+        return text[text.index('Alles Gefahrene'):] if 'Alles Gefahrene' in text else ''
+
+    try:
+        # Talkurs mit einem Fahrzeug im Cache mit Telemetrie: Nummer 2 ist
+        # Talkurs, weil Bergring Nord den juengeren Fahrtag hat.
+        strecken, ausgeblendet, _ = S.strecken_bauen(statistik_cache())
+        text = lauf(strecken, ausgeblendet, '2', 's', '', 'q')
+        pruefe('s = Statistik' in gefragt[1] and 'q = Ende' in gefragt[1],
+               'die Weiter-Zeile nach der Detailansicht nennt den Weg zur '
+               'Statistik -- und den hinaus')
+        pruefe('Alles Gefahrene -- Talkurs -- Yamaha MT-07' in text,
+               'die Ueberschrift nennt Strecke und Fahrzeug, auch wenn '
+               'niemand nach dem Fahrzeug gefragt wurde, weil es nur eines gibt')
+        pruefe('2 Turns an 1 Fahrtag, 3 Runden' in text,
+               'gezaehlt werden nur die Turns dieser Strecke')
+        zeilen = text.splitlines()
+        gefahren = [z for z in zeilen if z.strip().startswith('gefahren')][0]
+        gleich(gefahren.split()[1:3], ['15', 'km'],
+               'und nur ihre Kilometer -- 10 und 5, nicht die 3 vom Bergring')
+        pruefe('Bergring' not in text.split('Strecke / Fahrzeug')[0],
+               'die andere Strecke kommt in der Statistik nicht vor')
+        pruefe('Je Strecke' not in text and 'Je Fahrzeug' not in text,
+               'eine Tabelle mit einer Zeile wiederholte nur die '
+               'Ueberschrift und entfaellt')
+        pruefe('s = Statistik' not in gefragt[2] and 'q = Ende' in gefragt[2],
+               'nach der Statistik bietet die Weiter-Zeile sie nicht noch '
+               'einmal an')
+        pruefe(text.count('Strecke / Fahrzeug') == 1,
+               'danach steht die Uebersicht wieder da')
+
+        # Auf die Statistik zur Auswahl hin `q`: Ende, nicht Uebersicht.
+        text = lauf(strecken, ausgeblendet, '2', 's', 'q')
+        gleich(len(gefragt), 3, '`q` nach der Statistik beendet den Lauf')
+
+        # Zwei Fahrzeuge auf dem Talkurs: Das gewaehlte bestimmt die Zahlen.
+        strecken, ausgeblendet, _ = S.strecken_bauen(sessions_bauen(), MUSTER)
+        text = lauf(strecken, ausgeblendet, '1', '2', 's', '', 'q')
+        pruefe('Alles Gefahrene -- Talkurs -- Suzuki SV650' in text,
+               'das gewaehlte Fahrzeug steht in der Ueberschrift')
+        pruefe('1 Turn an 1 Fahrtag, 1 Runde' in text,
+               'und nur seine Turns werden gezaehlt')
+        pruefe('Yamaha' not in text.split('Strecke / Fahrzeug')[0],
+               'das andere Fahrzeug kommt nicht vor')
+
+        # Enter = alle Fahrzeuge: dann unterscheidet die Tabelle je
+        # Fahrzeug etwas und bleibt stehen.
+        text = lauf(strecken, ausgeblendet, '1', '', 's', '', 'q')
+        pruefe('Alles Gefahrene -- Talkurs\n' in text,
+               'ohne gewaehltes Fahrzeug steht keines in der Ueberschrift')
+        pruefe('3 Turns an 2 Fahrtagen, 7 Runden' in text
+               and 'mit 2 Fahrzeugen' in text,
+               'gezaehlt werden beide Fahrzeuge')
+        pruefe('Je Fahrzeug' in text and 'Je Strecke' not in text,
+               'die Tabelle je Fahrzeug bleibt, die je Strecke entfaellt')
+
+        # Bergring Nord: Session d hat eine andere Sektoreinteilung und
+        # fehlt in der Detailansicht. Gefahren ist sie trotzdem.
+        text = lauf(strecken, ausgeblendet, '2', 's', '', 'q')
+        pruefe('Alles Gefahrene -- Bergring Nord -- Yamaha MT-07' in text,
+               'Bergring Nord mit seinem einen Fahrzeug')
+        pruefe('2 Turns an 2 Fahrtagen, 3 Runden' in text,
+               'die Session mit abweichender Sektoreinteilung zaehlt mit -- '
+               'die Statistik haengt nicht am Layout')
+
+        # Ein Fahrzeugfilter wirkt auch hier: Was in der Ansicht nicht
+        # vorkommt, darf in der Statistik keine Kilometer haben.
+        strecken, ausgeblendet, _ = S.strecken_bauen(sessions_bauen(), MUSTER)
+        S.fahrzeuge_filtern(strecken, ['Suzuki*'])
+        text = lauf(strecken, ausgeblendet, '1', 's', '', 'q')
+        pruefe('Alles Gefahrene -- Talkurs -- Suzuki SV650' in text
+               and '1 Turn an 1 Fahrtag' in text,
+               'ein gefiltertes Fahrzeug zaehlt auch in der Statistik zur '
+               'Auswahl nicht')
+    finally:
+        builtins.input = echtes_input
+
+
 # --- Teil 2: der Weg uebers Netz ------------------------------------------
 #
 # Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro. Geprueft wird

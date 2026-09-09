@@ -146,6 +146,10 @@ AUSGANG = ('q', 'ende')
 # `q` "Programm aus". Zweimal None wuerde die beiden verwechseln.
 ENDE = object()
 
+# Die Antwort auf die Weiter-Zeile nach der Detailansicht, wenn statt des
+# Weitergehens die Statistik zur selben Auswahl gewuenscht ist.
+STATISTIK = object()
+
 
 def frage(text):
     """Eine Zeile einlesen. `ENDE` fuer `q`, None fuer Strg+C oder Dateiende.
@@ -1943,6 +1947,13 @@ def fahrzeuge_filtern(strecken, muster):
             else:
                 versteckt.add(z['fahrzeug'])
         eintrag['fahrzeuge'] = bleiben
+        # Die Sessions der Strecke ebenso, sonst zaehlte die Statistik zur
+        # Auswahl Kilometer eines Fahrzeugs, das in der Ansicht nicht
+        # vorkommt.
+        eintrag['sessions'] = [
+            s for s in eintrag['sessions']
+            if ist_ausgeblendet(s.get('fahrzeug', 'ohne Fahrzeug'),
+                                muster)]
     return len(versteckt)
 
 
@@ -2121,6 +2132,10 @@ def strecken_bauen(sessions, ausblenden=()):
             'felder': max([len(r['sektoren']) for s in eigene
                            for r in s.get('runden', [])] or [0]),
             'abweichend': abweichend,
+            # Alle Sessions der Strecke, auch die abweichenden -- fuer die
+            # Statistik zur Auswahl, die nicht am Layout haengt. Sie haben
+            # dieselbe Dopplungsbereinigung hinter sich wie die Runden.
+            'sessions': eigene,
             'letzte': max(s.get('datum', '') for s in eigene),
             'fahrzeuge': [],
         }
@@ -2883,12 +2898,19 @@ def statistik_tabelle(ueberschrift, spalte, zeilen):
                               wert_text(z['schraeglage_rechts']))))
 
 
-def zeige_statistik(stat, ordner=None):
-    """Alles Gefahrene -- Kilometer und Stunden statt Rundenzeiten."""
+def zeige_statistik(stat, ordner=None, titel=None):
+    """Alles Gefahrene -- Kilometer und Stunden statt Rundenzeiten.
+
+    `titel` nennt, worauf die Statistik eingeschraenkt ist -- eine Strecke,
+    ein Fahrzeug. Steht er da, entfaellt eine Tabelle mit nur einer Zeile:
+    Sie wiederholte nur die Ueberschrift, und der Block darueber hat
+    dieselben Zahlen schon. Ohne Titel bleibt alles, wie es war -- dort
+    ist auch die eine Zeile eine Antwort, naemlich *welches* Fahrzeug.
+    """
     g = stat['gesamt']
     melde()
     melde('=' * 82)
-    melde('Alles Gefahrene')
+    melde('Alles Gefahrene' + (' -- %s' % titel if titel else ''))
     melde('=' * 82)
     melde('%s an %s, %s auf %s mit %s'
           % (anzahl(g['sessions'], 'Turn', 'Turns'),
@@ -2943,9 +2965,45 @@ def zeige_statistik(stat, ordner=None):
         melde('    %-15s%8d Messpunkte ohne Positionsfix'
               % ('verworfen', g['punkte_ohne_ort']))
 
-    statistik_tabelle('Je Fahrzeug', 'Fahrzeug', stat['je_fahrzeug'])
-    statistik_tabelle('Je Strecke', 'Strecke', stat['je_strecke'])
+    for ueberschrift, spalte, zeilen in (
+            ('Je Fahrzeug', 'Fahrzeug', stat['je_fahrzeug']),
+            ('Je Strecke', 'Strecke', stat['je_strecke'])):
+        if titel is None or len(zeilen) > 1:
+            statistik_tabelle(ueberschrift, spalte, zeilen)
     statistik_fussnoten(stat, ordner)
+
+
+def zeige_statistik_zur_auswahl(eintrag, nur=None, ordner=None):
+    """Alles Gefahrene, eingeschraenkt auf eine Strecke und ein Fahrzeug.
+
+    Die Detailansicht beantwortet, was drin liegt; diese hier, was dort
+    zusammengekommen ist -- Kilometer, Stunden, Schnitt, Hoechstwerte.
+    Sie kommt auf Anfrage und nicht von selbst, damit die Detailansicht
+    nicht laenger wird, als sie sein muss.
+
+    Gezaehlt wird, was die Statistik immer zaehlt: alle Sessions dieser
+    Strecke, auch die mit einer abweichenden Sektoreinteilung. Ein
+    Kilometer ist gefahren, egal wo RaceBox die Splitpunkte gesetzt hat.
+    `nur` ist das gewaehlte Fahrzeug; None heisst alle -- dann bleibt die
+    Tabelle je Fahrzeug stehen, denn dann unterscheidet sie etwas.
+    """
+    if nur is not None and nur not in eintrag['fahrzeuge']:
+        nur = None
+    sessions = eintrag['sessions']
+    titel = langname(eintrag)
+    if nur is not None:
+        sessions = [s for s in sessions
+                    if s.get('fahrzeug', 'ohne Fahrzeug') == nur['fahrzeug']]
+        titel = '%s -- %s' % (titel, nur['fahrzeug'])
+    stat = statistik_bauen(sessions)
+    # Wer nur ein Fahrzeug hat, wird nicht gefragt -- und bekaeme eine
+    # Ueberschrift ohne dessen Namen, waehrend die Tabelle je Fahrzeug als
+    # Einzeiler entfaellt. Dann stuende nirgends, um welches es geht. Der
+    # Name kommt aus den Zahlen, nicht aus der Auswahl: Er steht nur da,
+    # wenn wirklich genau eines gezaehlt wurde.
+    if nur is None and len(stat['je_fahrzeug']) == 1:
+        titel = '%s -- %s' % (titel, stat['je_fahrzeug'][0]['name'])
+    zeige_statistik(stat, ordner, titel)
 
 
 def statistik_fussnoten(stat, ordner=None):
@@ -3282,11 +3340,25 @@ def fahrzeug_waehlen(eintrag):
     return None
 
 
-def weiter():
-    """Das Anhalten nach einer Ansicht. None heisst: Schluss."""
+def weiter(mit_statistik=False):
+    """Das Anhalten nach einer Ansicht. None heisst: Schluss.
+
+    Nach der Detailansicht steht in der Zeile auch der Weg zur Statistik
+    derselben Auswahl -- dort und nur dort, denn nur dort gibt es eine
+    Auswahl, auf die sie sich beziehen koennte. Return `STATISTIK`, wenn
+    sie gewuenscht ist.
+    """
     melde()
-    antwort = frage('Weiter mit Enter, q = Ende ... ')
-    return None if antwort is None or antwort is ENDE else antwort
+    if mit_statistik:
+        antwort = frage('Weiter mit Enter, s = Statistik zu dieser Auswahl, '
+                        'q = Ende ... ')
+    else:
+        antwort = frage('Weiter mit Enter, q = Ende ... ')
+    if antwort is None or antwort is ENDE:
+        return None
+    if mit_statistik and antwort.strip().lower() in ('s', 'statistik'):
+        return STATISTIK
+    return antwort
 
 
 def schleife(strecken, ausgeblendet, turns_zeigen, ordner=None,
@@ -3319,7 +3391,14 @@ def schleife(strecken, ausgeblendet, turns_zeigen, ordner=None,
         if gewaehlt is ENDE:
             continue
         zeige_detail(eintrag, turns_zeigen, gewaehlt)
-        if weiter() is None:
+        # Nach der Detailansicht liegt die zweite Frage nahe: nicht was
+        # drin liegt, sondern was dort zusammengekommen ist. Sie kommt
+        # auf `s` und nicht von selbst -- die Detailansicht ist lang genug.
+        antwort = weiter(mit_statistik=True)
+        if antwort is STATISTIK:
+            zeige_statistik_zur_auswahl(eintrag, gewaehlt, ordner)
+            antwort = weiter()
+        if antwort is None:
             return
 
 

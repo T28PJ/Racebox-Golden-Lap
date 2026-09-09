@@ -411,6 +411,30 @@ MUTATIONEN = [
      "                     's = Statistik, Enter oder q = Ende: '",
      "'Auswahl -- Nummer oder Name = Strecke, '\n"
      "                     'Enter oder q = Ende: '"),
+    ('die Statistik zur Auswahl steht nicht in der Weiter-Zeile',
+     "antwort = frage('Weiter mit Enter, s = Statistik zu dieser Auswahl, '\n"
+     "                        'q = Ende ... ')",
+     "antwort = frage('Weiter mit Enter, q = Ende ... ')"),
+    ('die Statistik zur Auswahl wird nach sich selbst noch einmal angeboten',
+     '            zeige_statistik_zur_auswahl(eintrag, gewaehlt, ordner)\n'
+     '            antwort = weiter()',
+     '            zeige_statistik_zur_auswahl(eintrag, gewaehlt, ordner)\n'
+     '            antwort = weiter(mit_statistik=True)'),
+    ('die Statistik zur Auswahl laesst abweichende Sessions weg',
+     "            'sessions': eigene,", "            'sessions': passend,"),
+    ('die Statistik zur Auswahl ignoriert das gewaehlte Fahrzeug',
+     "if s.get('fahrzeug', 'ohne Fahrzeug') == nur['fahrzeug']]",
+     "if s.get('fahrzeug', 'ohne Fahrzeug') or True]"),
+    ('der Fahrzeugfilter greift in der Statistik zur Auswahl nicht',
+     "        eintrag['sessions'] = [\n"
+     "            s for s in eintrag['sessions']\n"
+     "            if ist_ausgeblendet(s.get('fahrzeug', 'ohne Fahrzeug'),\n"
+     "                                muster)]",
+     '        pass'),
+    ('die Ueberschrift der Auswahl nennt das einzige Fahrzeug nicht',
+     "if nur is None and len(stat['je_fahrzeug']) == 1:", 'if False:'),
+    ('eine Tabelle mit einer Zeile wiederholt die Ueberschrift der Auswahl',
+     'if titel is None or len(zeilen) > 1:', 'if True:'),
 ]
 
 
