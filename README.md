@@ -89,7 +89,7 @@ ein zulässiges Passwort; der Ausgang ist die leere Eingabe.
 | `--csv` | über den alten CSV-Weg holen statt über JSON |
 | `--ohne-csv` | Runden aus dem JSON nehmen statt aus dem Export |
 | `--cache ordner` | anderer Cache-Ordner |
-| `--diagnose ordner` | die geholten Seiten als Rohabzug ablegen |
+| `--diagnose ordner` | die geholten Seiten samt Kopfzeilen und die Login-Antwort als Rohabzug ablegen |
 
 ## Was die Detailansicht zeigt
 

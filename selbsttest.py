@@ -2397,6 +2397,8 @@ class Zustand:
         self.verdreht = set()     # Sessions, deren CSV absichtlich abweicht
         self.bei_null = set()     # Sessions, deren erste Runde bei Record 0 beginnt
         self.ohne_erste = set()   # Sessions, deren CSV die erste Runde nicht listet
+        self.stumm = False        # antwortet auf Login und Liste mit 200 und nichts
+        self.leer = False         # ein Konto ohne Sessions
         self.kennungen = set()
         self.pfade = []
         self.geschrieben = 0
@@ -2467,6 +2469,10 @@ class Griff(BaseHTTPRequestHandler):
         self.zustand.pfade.append(self.path)
         felder = self._felder()
         if self.path == '/webapp/login':
+            if self.zustand.stumm:
+                # Der Fall vom Raspberry Pi: 200, keine Weiterleitung, kein
+                # Keks, kein Rumpf -- und die Liste danach genauso.
+                return self._antwort('')
             richtig = (felder.get('email') == EMAIL
                        and felder.get('password') == PASSWORT)
             if not richtig:
@@ -2488,6 +2494,8 @@ class Griff(BaseHTTPRequestHandler):
         self._antwort('nichts', 404)
 
     def _sessions(self, frage):
+        if self.zustand.stumm:
+            return self._antwort('')
         if not self._angemeldet():
             return self._antwort(self._formular())
         vid = (frage.get('vid') or ['all'])[0]
@@ -2499,6 +2507,8 @@ class Griff(BaseHTTPRequestHandler):
         ids = [sid for sid, (_, _, fzg, _) in
                sorted(TESTSESSIONS.items(), key=wann, reverse=True)
                if vid == 'all' or FZG_KURZ.get(fzg or '') == vid]
+        if self.zustand.leer:
+            ids = []
         stueck = ids[(seite - 1) * 3:seite * 3]
         auswahl = ''.join('<option value="%s">%s</option>' % (k, v)
                           for k, v in sorted(FAHRZEUGE.items()))
@@ -2915,6 +2925,113 @@ def test_netz():
             os.environ.pop('RACEBOX_PASSWORT', None)
     finally:
         S.BASIS = echte_basis
+        server.shutdown()
+
+
+def test_stumme_antwort():
+    """Eine leere 200-Antwort ist keine leere Sessionliste.
+
+    So kam es auf einem Raspberry Pi: Login 200 ohne Weiterleitung, die
+    Sessionliste 200 mit null Bytes -- und das Werkzeug meldete "0
+    Sessions" und "angemeldet als". Beides war nicht beobachtet, sondern
+    geschlossen. Jetzt bricht es ab und legt mit --diagnose alles ab, was
+    man zum Nachsehen braucht: auch die Antwort auf den Login selbst.
+    """
+    server, basis, zustand = server_starten()
+    echte_basis, S.BASIS = S.BASIS, 'http://127.0.0.1:1/verboten'
+    diag = tempfile.mkdtemp()
+    cache = tempfile.mkdtemp()
+
+    def abzug(name):
+        with open(os.path.join(diag, name), encoding='utf-8') as f:
+            return f.read()
+
+    try:
+        zustand.stumm = True
+        rb = S.RaceBox(basis, diagnose=diag, zeitgrenze=5)
+        puffer, fehler = io.StringIO(), None
+        with contextlib.redirect_stdout(puffer):
+            try:
+                rb.anmelden(EMAIL, PASSWORT)
+            except S.AnmeldungFehlgeschlagen as e:
+                fehler = ('zugang', str(e))
+            except SystemExit as e:
+                fehler = ('abbruch', str(e))
+        pruefe(fehler is not None,
+               'eine stumme Antwort bricht ab, statt als leere Liste zu gelten')
+        pruefe(fehler and fehler[0] == 'abbruch',
+               'und behauptet nicht, das Passwort sei falsch')
+        pruefe(fehler and '0 Bytes' in fehler[1], 'die Meldung nennt, was kam')
+        pruefe(fehler and '--diagnose' in fehler[1], 'und wie man weiterkommt')
+        pruefe(fehler and '--zugang' not in fehler[1],
+               'ohne zum Neusetzen des Passworts zu raten')
+        pruefe('302' in puffer.getvalue(),
+               'die Ausgabe sagt, dass 200 ohne Weiterleitung nicht die '
+               'Antwort auf eine angenommene Anmeldung ist')
+        pruefe('angemeldet als' not in puffer.getvalue(),
+               'und nennt niemanden angemeldet')
+
+        kopf = abzug('login.kopfzeilen')
+        pruefe(kopf.startswith('HTTP 200'),
+               'die Login-Antwort liegt mit Statuscode im Diagnoseordner')
+        pruefe('Content-Length: 0' in kopf, 'samt ihren Kopfzeilen')
+        pruefe('0 Bytes Rumpf' in kopf, 'und der Laenge des Rumpfs')
+        gleich(abzug('login.html'), '', 'der Rumpf selbst liegt daneben')
+        pruefe(abzug('sessions_seite1.html.kopfzeilen').startswith('HTTP 200'),
+               'die Sessionliste bekommt ihre Kopfzeilen dazu')
+
+        # -- der gute Fall: der 302 steht im Abzug, die Liste ist erkannt --
+        zustand.stumm = False
+        rb2 = S.RaceBox(basis, diagnose=diag, zeitgrenze=5)
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            html = rb2.anmelden(EMAIL, PASSWORT)
+        kopf = abzug('login.kopfzeilen')
+        pruefe(kopf.startswith('HTTP 302') and 'Location: ' in kopf,
+               'im guten Fall steht der 302 samt Ziel im Abzug')
+        pruefe('Set-Cookie: auth=1' in kopf,
+               'und das Sitzungsmerkmal, so wie es kam')
+        pruefe(('Sessionliste: %d Bytes' % len(html)) in puffer.getvalue(),
+               'die Ausgabe nennt, wie gross die Liste war')
+        pruefe('302' not in puffer.getvalue().split('Weiterleitung nach')[0],
+               'der Hinweis auf den fehlenden 302 kommt nur ohne 302')
+
+        # -- ein Konto ohne Sessions ist trotzdem eine Sessionliste --------
+        zustand.leer = True
+        rb3 = S.RaceBox(basis, zeitgrenze=5)
+        with contextlib.redirect_stdout(io.StringIO()):
+            html = rb3.anmelden(EMAIL, PASSWORT)
+            gleich(rb3.alle_ids(), [],
+                   'ein Konto ohne Sessions liefert eine leere, echte Liste')
+        pruefe(S.ist_sessionliste(html),
+               'sie wird an der Fahrzeugauswahl erkannt')
+        pruefe(not S.ist_sessionliste(''), 'nichts ist keine Liste')
+        pruefe(not S.ist_sessionliste('<html><body>Willkommen</body></html>'),
+               'eine Seite ohne Link und ohne Auswahl auch nicht')
+        pruefe(S.ist_sessionliste('<a href="/webapp/session/%s">' % ('a' * 24)),
+               'ein Session-Link reicht')
+
+        os.environ['RACEBOX_EMAIL'] = EMAIL
+        os.environ['RACEBOX_PASSWORT'] = PASSWORT
+        puffer, meldung = io.StringIO(), None
+        with contextlib.redirect_stdout(puffer):
+            try:
+                S.main(['--basis', basis, '--cache', cache])
+            except SystemExit as e:
+                meldung = str(e)
+        pruefe(meldung is not None and 'keine' in meldung,
+               'der ganze Lauf endet mit einer Meldung')
+        pruefe(meldung and '--nur-cache' not in meldung,
+               'die nicht empfiehlt, einen Schalter wegzulassen, der nicht '
+               'gesetzt war')
+        pruefe('Sessionliste ist leer' in puffer.getvalue(),
+               'und vorher steht, was beobachtet wurde: eine leere Liste')
+    finally:
+        S.BASIS = echte_basis
+        os.environ.pop('RACEBOX_EMAIL', None)
+        os.environ.pop('RACEBOX_PASSWORT', None)
+        shutil.rmtree(diag)
+        shutil.rmtree(cache)
         server.shutdown()
 
 

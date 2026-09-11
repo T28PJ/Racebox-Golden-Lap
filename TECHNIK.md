@@ -65,6 +65,16 @@ zu unterscheiden.
 `/webapp/session/<24 Hexzeichen>` statt über die Seitenstruktur — das
 überlebt eine Umgestaltung der Kacheln.
 
+**Eine Antwort ohne Session-Link und ohne Fahrzeugauswahl ist keine
+Sessionliste.** Ein Konto ohne Sessions hat noch die Auswahlfelder; eine
+Startseite, ein Fehlertext oder ein 200er mit null Bytes haben keines von
+beidem. Das Werkzeug bricht dann ab, statt „0 Sessions" zu melden. Der
+Anlass: Auf einem Raspberry Pi antwortete racebox.pro auf den Login mit
+200 ohne Weiterleitung und auf die Sessionliste mit 200 und null Bytes —
+ausgegeben wurde „angemeldet als“ und „0 Sessions“, beides geschlossen,
+nichts davon beobachtet. Die Ursache ist noch nicht geklärt; die Spur
+liegt in den Abzügen von `--diagnose`.
+
 **Der JSON-Endpunkt** `/webapp/session/<id>/json`: Unter `session.meta`
 stehen `track`, `vehicle`, `indexInTheDay` (der Turn),
 `dateTimeStartedLocal`, `laps` mit ihren `sectors`, dazu `bestLapTime`,
@@ -228,7 +238,7 @@ das waren die Indizes. Was sich nicht eindeutig als Zeit ausweist, wird
 python3 selbsttest.py
 ```
 
-582 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
+606 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
 — mit Anmeldung, Cookies, Blättern, Fahrzeugfilter und einem 5 MB großen
 Export. Geprüft wird beobachtbares Verhalten: welche Felder rausgehen, was
 im Cache landet, was bei Fehlern passiert.
@@ -241,7 +251,7 @@ Drei Dinge beim Ändern:
 - **Der Test biegt `BASIS` auf eine tote Adresse um.** Bleibt beim Ändern
   eine echte Adresse stehen, scheitert er, statt heimlich ins Netz zu gehen.
 - **Neue Prüfungen einmal absichtlich rot laufen lassen** — dafür gibt es
-  `python3 mutationen.py`. Es baut 122 Fehler ein, die ein Mensch wirklich
+  `python3 mutationen.py`. Es baut 138 Fehler ein, die ein Mensch wirklich
   machen könnte, und meldet jeden, der unbemerkt bleibt. Der volle Lauf
   kostet Minuten; gefiltert geht es schneller:
   `python3 mutationen.py statistik`, `-j 8` ändert die Nebenläufigkeit.
@@ -257,7 +267,12 @@ nachgemessen und nicht dokumentiert, racebox.pro schuldet uns nichts.
 Ändert sich das HTML des Fahrzeug-Auswahlfelds, findet die Zuordnung nichts
 mehr — dann rechnet das Werkzeug ohne Fahrzeugtrennung weiter und sagt das,
 statt zu raten. `--diagnose <ordner>` legt die Seiten ab, damit sich das
-Muster nachziehen lässt.
+Muster nachziehen lässt — und zu jeder benannten Antwort Statuscode und
+Kopfzeilen in `<name>.kopfzeilen`, auch bei einem 403 oder 500. Die
+Antwort auf den Login selbst liegt als `login.kopfzeilen` und `login.html`
+daneben; dort steht, ob der 302 kam, welche Kekse gesetzt wurden und wer
+überhaupt geantwortet hat. Die Kekse darin sind Sitzungsmerkmale — vor dem
+Weitergeben schwärzen.
 
 **Was RaceBox falsch misst, misst auch dieses Werkzeug falsch.** Die beiden
 Quellen stammen aus derselben Datenbank; sie gegeneinander zu halten prüft

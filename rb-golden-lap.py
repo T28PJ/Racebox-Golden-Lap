@@ -514,13 +514,17 @@ class RaceBox:
     def _keksband(self):
         return '; '.join('%s=%s' % (k, v) for k, v in self.kekse.items())
 
-    def _anfrage(self, pfad, daten=None, nur_bis=None):
+    def _anfrage(self, pfad, daten=None, nur_bis=None, name=None):
         """Eine Anfrage; Weiterleitungen werden nicht verfolgt.
 
         Das ist hier kein Verzicht, sondern Absicht: Nach der Anmeldung
         schickt racebox.pro einen 302 hinterher, dessen Ziel an manchen
         Anschluessen nicht erreichbar ist. Gebraucht wird er nicht -- das
         Sitzungsmerkmal steht im 302 selbst.
+
+        Mit `name` und `--diagnose` landen Statuscode und Kopfzeilen der
+        Antwort in `<name>.kopfzeilen` -- auch bei einem 403 oder 500,
+        denn gerade dann will man wissen, wer da geantwortet hat.
         """
         with self.schloss:
             self.anfragen += 1
@@ -537,6 +541,10 @@ class RaceBox:
             raise SystemExit('racebox.pro ist nicht erreichbar: %s\n'
                              'Angefragt war %s%s.' % (e, self.basis, pfad))
         self._kekse_merken(kopfzeilen)
+        if name:
+            self._abzug(name + '.kopfzeilen',
+                        'HTTP %s\n%s%d Bytes Rumpf\n'
+                        % (code, kopfzeilen, len(rumpf)))
         if code == 403:
             raise SystemExit(
                 'racebox.pro antwortet mit 403 auf %s.\nEin 403 kam frueher '
@@ -548,7 +556,7 @@ class RaceBox:
         return code, kopfzeilen, rumpf
 
     def _text(self, pfad, daten=None, name=None):
-        _, _, roh = self._anfrage(pfad, daten)
+        _, _, roh = self._anfrage(pfad, daten, name=name)
         text = roh.decode('utf-8', 'replace')
         self._abzug(name, text)
         return text
@@ -573,22 +581,40 @@ class RaceBox:
         Auf den Statuscode ist kein Verlass: Die Seite antwortet auch mit
         200, wenn sie nur wieder das Anmeldeformular zeigt. Geprueft wird
         deshalb, ob danach noch ein Passwortfeld dasteht.
+
+        Und ob ueberhaupt eine Sessionliste kam: Eine Antwort ohne
+        Session-Link und ohne Fahrzeugauswahl ist keine -- ein leerer
+        200er etwa, wie ihn ein Filter oder ein Schutz vor dem Server
+        schickt. Die hiesse sonst "0 Sessions", und das waere gelogen.
         """
         melde('  Anmeldeformular abschicken ...')
-        code, kopfzeilen, _ = self._anfrage(
-            LOGIN, {'email': email, 'password': passwort, 'redirect_to': ''})
+        code, kopfzeilen, rumpf = self._anfrage(
+            LOGIN, {'email': email, 'password': passwort, 'redirect_to': ''},
+            name='login')
+        self._abzug('login.html', rumpf.decode('utf-8', 'replace'))
         ziel = kopfzeilen.get('Location', '')
         if ziel:
             melde('  angenommen, Weiterleitung nach %s (wird nicht gefolgt)'
                   % ziel)
         else:
-            melde('  Antwort %s ohne Weiterleitung' % code)
+            melde('  Antwort %s ohne Weiterleitung -- eine angenommene '
+                  'Anmeldung antwortet sonst mit 302' % code)
         melde('  Sessionliste holen ...')
         html = self._text(self.liste_url(), name='sessions_seite1.html')
         if 'name="password"' in html:
             raise AnmeldungFehlgeschlagen(
                 'Anmeldung fehlgeschlagen -- E-Mail oder Passwort stimmen '
                 'nicht. Neu setzen: rb-golden-lap.py --zugang')
+        if not ist_sessionliste(html):
+            raise SystemExit(
+                'Die Sessionliste kam mit %d Bytes zurueck und enthaelt '
+                'weder einen Session-Link noch die Fahrzeugauswahl -- das '
+                'ist keine Sessionliste und kein Anmeldeformular. Ob die '
+                'Anmeldung angenommen wurde, laesst sich so nicht sagen.\n'
+                'Mit --diagnose <ordner> legt der naechste Lauf Kopfzeilen '
+                'und Antworten ab (login.kopfzeilen, login.html, '
+                'sessions_seite1.html.kopfzeilen).' % len(html))
+        melde('  Sessionliste: %d Bytes, kein Anmeldeformular' % len(html))
         return html
 
     def liste_url(self, seite=1, vid='all'):
@@ -1374,13 +1400,12 @@ OPTION_MUSTER = re.compile(
 TAGS = re.compile(r'<[^>]+>')
 
 
-def fahrzeuge_lesen(html):
-    """{id: name} aus der Fahrzeugauswahl der Sessionliste.
+def fahrzeugauswahl(html):
+    """Die Auswahlfelder der Sessionliste, die Fahrzeuge enthalten.
 
     Zwei Wege, in dieser Reihenfolge: das Auswahlfeld, dessen Name `vid`
-    ist, sonst das, dessen erster Eintrag "All Vehicles" heisst. Findet
-    sich keines, kommt ein leeres dict zurueck -- der Aufrufer arbeitet
-    dann ohne Fahrzeuge weiter, statt abzubrechen.
+    ist, sonst das, dessen erster Eintrag "All Vehicles" heisst. Return
+    eine Liste von [(wert, name), ...] je Feld, leer, wenn keines da ist.
     """
     kandidaten = []
     for t in SELECT_MUSTER.finditer(html):
@@ -1398,11 +1423,30 @@ def fahrzeuge_lesen(html):
             for e in eintraege)
         if heisst_vid or alle_fahrzeuge:
             kandidaten.append(eintraege)
+    return kandidaten
 
+
+def fahrzeuge_lesen(html):
+    """{id: name} aus der Fahrzeugauswahl der Sessionliste.
+
+    Findet sich kein Auswahlfeld, kommt ein leeres dict zurueck -- der
+    Aufrufer arbeitet dann ohne Fahrzeuge weiter, statt abzubrechen.
+    """
+    kandidaten = fahrzeugauswahl(html)
     if not kandidaten:
         return {}
     return {wert: name for wert, name in kandidaten[0]
             if wert and wert != 'all'}
+
+
+def ist_sessionliste(html):
+    """Ob die Seite eine Sessionliste ist -- auch eine ohne Sessions.
+
+    Erkannt wird sie an einem Session-Link oder an der Fahrzeugauswahl.
+    Ein Konto ohne Sessions hat noch die Auswahlfelder; eine stumme
+    Antwort, eine Startseite oder ein Fehlertext haben keines von beidem.
+    """
+    return bool(ID_MUSTER.search(html) or fahrzeugauswahl(html))
 
 
 # --- Abgleich mit dem CSV-Export ------------------------------------------
@@ -3133,6 +3177,9 @@ def abgleichen(rb, email, passwort, cache_ordner=None, neu=False,
     # geholt wird -- so steht das Interessanteste zuerst im Cache, und
     # --seit kann aufhoeren, sobald es alt genug wird.
     ids = rb.alle_ids(melden=True)
+    if not ids:
+        melde('  Die Sessionliste ist leer: racebox.pro nennt fuer dieses '
+              'Konto keine Session.')
     fehlend = [i for i in ids
                if neu or vorhanden.get(i, {}).get('version', 0) < CACHE_VERSION]
     melde('  %d Session(s) insgesamt, %d zu holen' % (len(ids), len(fehlend)))
@@ -3505,9 +3552,13 @@ def main(argv=None):
 
     sessions = list(cache_lesen(cache_ordner).values())
     if not sessions:
+        if a.nur_cache:
+            raise SystemExit(
+                'Keine Sessions im Cache (%s). Ohne --nur-cache starten, '
+                'dann werden sie geholt.' % cache_ordner)
         raise SystemExit(
-            'Keine Sessions im Cache (%s). Ohne --nur-cache starten, dann '
-            'werden sie geholt.' % cache_ordner)
+            'Keine Sessions im Cache (%s): racebox.pro hat fuer dieses '
+            'Konto keine genannt.' % cache_ordner)
 
     if a.ausblenden:
         melde('Ausblendliste ergaenzen ...')
