@@ -2471,8 +2471,16 @@ class Griff(BaseHTTPRequestHandler):
         if self.path == '/webapp/login':
             if self.zustand.stumm:
                 # Der Fall vom Raspberry Pi: 200, keine Weiterleitung, kein
-                # Keks, kein Rumpf -- und die Liste danach genauso.
-                return self._antwort('')
+                # Rumpf -- und die Liste danach genauso. Dazu ein Keks und
+                # eine fremde Kopfzeile mit Werten, die nirgends in einer
+                # Ausgabe auftauchen duerfen.
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Length', '0')
+                self.send_header('Set-Cookie', 'spur=GEHEIM123; Path=/')
+                self.send_header('X-Spur', 'WERT42')
+                self.end_headers()
+                return
             richtig = (felder.get('email') == EMAIL
                        and felder.get('password') == PASSWORT)
             if not richtig:
@@ -2968,6 +2976,24 @@ def test_stumme_antwort():
         pruefe('302' in puffer.getvalue(),
                'die Ausgabe sagt, dass 200 ohne Weiterleitung nicht die '
                'Antwort auf eine angenommene Anmeldung ist')
+        meldung = fehler[1] if fehler else ''
+        pruefe('login: HTTP 200, 0 Bytes Rumpf, keine Weiterleitung' in meldung,
+               'die Meldung fasst die Login-Antwort zusammen')
+        pruefe('sessions_seite1.html: HTTP 200, 0 Bytes Rumpf' in meldung,
+               'und die der Sessionliste')
+        pruefe('Server: BaseHTTP' in meldung,
+               'mit dem Namen des Servers, der geantwortet hat')
+        pruefe('Content-Length: 0' in meldung, 'und der Form der Antwort')
+        pruefe('Kekse (nur Namen): spur' in meldung,
+               'Kekse stehen mit Namen drin')
+        pruefe('GEHEIM123' not in meldung, 'aber nie mit Wert')
+        pruefe('x-spur' in meldung,
+               'fremde Kopfzeilen stehen mit Namen drin')
+        pruefe('WERT42' not in meldung, 'und ebenfalls nie mit Wert')
+        gleich(S.kopfzeilen_ohne_werte(S.http.client.HTTPMessage()),
+               ['Kekse (nur Namen): keine',
+                'weitere Kopfzeilen (nur Namen): keine'],
+               'ohne Kopfzeilen sagt die Zusammenfassung das auch')
         pruefe('angemeldet als' not in puffer.getvalue(),
                'und nennt niemanden angemeldet')
 

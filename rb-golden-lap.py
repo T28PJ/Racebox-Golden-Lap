@@ -69,6 +69,15 @@ CACHE_VERSION = 5
 # steht hier, was das Werkzeug wirklich ist, und kein vorgetaeuschter Safari.
 KENNUNG = 'racebox-golden-lap/1.0 (+https://github.com/T28PJ/racebox-golden-lap)'
 
+# Kopfzeilen, deren Wert in der Zusammenfassung einer Antwort stehen darf:
+# Sie sagen, wer geantwortet hat und in welcher Form, und nichts ueber das
+# Konto. Alle anderen erscheinen nur mit Namen -- Kekse, Kennungen, Zeiten
+# und was ein Schutzdienst sonst noch mitschickt, sind Werte, die man nicht
+# weitergeben moechte, und die Zusammenfassung ist zum Weitergeben da.
+SICHTBARE_KOPFZEILEN = ('Server', 'Content-Type', 'Content-Length',
+                        'Transfer-Encoding', 'Connection', 'CF-Mitigated',
+                        'X-Amzn-Waf-Action')
+
 # Ohne Zeitgrenze wartet urllib unbegrenzt. Eine stehende Verbindung -- ein
 # Proxy, der nicht antwortet, ein halb offener TLS-Handschlag -- sieht dann
 # aus wie ein Absturz, und man weiss nicht einmal, an welcher Stelle.
@@ -448,6 +457,7 @@ class RaceBox:
         self.zeitgrenze = zeitgrenze or ZEITGRENZE
         self.nur_ipv4 = nur_ipv4
         self.kekse = {}
+        self.antworten = {}           # name -> (code, kopfzeilen, bytes)
         self.anfragen = 0             # nur zum Zaehlen im Selbsttest
         self.oertlich = threading.local()
         self.schloss = threading.Lock()
@@ -542,6 +552,8 @@ class RaceBox:
                              'Angefragt war %s%s.' % (e, self.basis, pfad))
         self._kekse_merken(kopfzeilen)
         if name:
+            with self.schloss:
+                self.antworten[name] = (code, kopfzeilen, len(rumpf))
             self._abzug(name + '.kopfzeilen',
                         'HTTP %s\n%s%d Bytes Rumpf\n'
                         % (code, kopfzeilen, len(rumpf)))
@@ -611,11 +623,33 @@ class RaceBox:
                 'weder einen Session-Link noch die Fahrzeugauswahl -- das '
                 'ist keine Sessionliste und kein Anmeldeformular. Ob die '
                 'Anmeldung angenommen wurde, laesst sich so nicht sagen.\n'
+                'Was geantwortet hat, ohne Werte, die etwas ueber das Konto '
+                'verraten:\n%s\n'
                 'Mit --diagnose <ordner> legt der naechste Lauf Kopfzeilen '
-                'und Antworten ab (login.kopfzeilen, login.html, '
-                'sessions_seite1.html.kopfzeilen).' % len(html))
+                'und Antworten vollstaendig ab (login.kopfzeilen, '
+                'login.html, sessions_seite1.html.kopfzeilen).'
+                % (len(html), self.antworten_zusammenfassen()))
         melde('  Sessionliste: %d Bytes, kein Anmeldeformular' % len(html))
         return html
+
+    def antworten_zusammenfassen(self):
+        """Die bisherigen Antworten als Text, den man weitergeben kann.
+
+        Je Antwort Statuscode, Rumpfgroesse, ob eine Weiterleitung kam,
+        die Kopfzeilen aus SICHTBARE_KOPFZEILEN mit Wert -- und alle
+        uebrigen, Kekse voran, nur mit Namen. Daran sieht man, ob
+        racebox.pro selbst geantwortet hat oder ein Schutz davor, ohne
+        dass ein Sitzungsmerkmal oder eine Kennung im Text steht.
+        """
+        zeilen = []
+        for name, (code, kopfzeilen, laenge) in self.antworten.items():
+            zeilen.append('  %s: HTTP %s, %d Bytes Rumpf, %s'
+                          % (name, code, laenge,
+                             'mit Weiterleitung' if kopfzeilen.get('Location')
+                             else 'keine Weiterleitung'))
+            zeilen.extend('    ' + z for z in
+                          kopfzeilen_ohne_werte(kopfzeilen))
+        return '\n'.join(zeilen)
 
     def liste_url(self, seite=1, vid='all'):
         """Die Sessionliste mit den Filtern aus der Oberflaeche.
@@ -1437,6 +1471,33 @@ def fahrzeuge_lesen(html):
         return {}
     return {wert: name for wert, name in kandidaten[0]
             if wert and wert != 'all'}
+
+
+def kopfzeilen_ohne_werte(kopfzeilen):
+    """Kopfzeilen als Zeilen: sichtbare mit Wert, alle anderen nur Namen.
+
+    `kopfzeilen` ist eine `email.message.Message`, wie `http.client` sie
+    liefert; Namen werden dort ohne Ruecksicht auf Gross- und
+    Kleinschreibung verglichen. Kekse stehen als eigene Zeile, weil sie
+    die erste Frage beantworten: Hat der Server eine Sitzung angelegt?
+    """
+    sichtbar = {n.lower(): n for n in SICHTBARE_KOPFZEILEN}
+    mit_wert, kekse, nur_namen = [], [], []
+    for name, wert in kopfzeilen.items():
+        klein = name.lower()
+        if klein == 'set-cookie':
+            kekse.append(wert.partition('=')[0].strip())
+        elif klein in sichtbar:
+            mit_wert.append('%s: %s' % (sichtbar[klein], wert.strip()))
+        elif klein == 'location':
+            pass                     # steht schon in der Zeile darueber
+        elif klein not in nur_namen:
+            nur_namen.append(klein)
+    zeilen = list(mit_wert)
+    zeilen.append('Kekse (nur Namen): %s' % (', '.join(kekse) or 'keine'))
+    zeilen.append('weitere Kopfzeilen (nur Namen): %s'
+                  % (', '.join(nur_namen) or 'keine'))
+    return zeilen
 
 
 def ist_sessionliste(html):
