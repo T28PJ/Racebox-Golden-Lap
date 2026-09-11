@@ -76,13 +76,26 @@ Namen. Welche Werte gezeigt werden, steht in `SICHTBARE_KOPFZEILEN`; alles
 andere bleibt draußen, damit sich die Zusammenfassung weitergeben lässt,
 ohne dass ein Sitzungsmerkmal oder eine Kennung mitgeht.
 
+**Leitet die Sessionliste um (302), wurde die Anmeldung nicht
+angenommen.** Nur ein Unangemeldeter wird von dort weggeschickt. Das
+Werkzeug meldet dann den Pfad des Ziels ohne Parameter und wertet die
+Antwort auf das Anmeldeformular aus, wieder ohne Werte: Titel, jedes
+Formular mit Methode, Pfad und Feldnamen, die Hosts eingebundener Skripte,
+dazu die Merkmale Anmeldeformular, Token-Feld, Captcha und Fehlerwörter im
+sichtbaren Text. Daran sieht man, ob ein falsches Passwort vorliegt oder
+racebox.pro das Verfahren umgebaut hat — ein CSRF-Token oder ein Captcha
+im Formular kann kein Passwort beheben. Kommt statt HTML Zeichensalat,
+steht das da: Dann ist die Antwort komprimiert angekommen und nicht
+entpackt worden.
+
 Der Anlass: Im September 2026 antwortete racebox.pro auf den Login mit
-200 ohne Weiterleitung und auf die Sessionliste mit 200 und null Bytes —
-ausgegeben wurde „angemeldet als“ und „0 Sessions“, beides geschlossen,
-nichts davon beobachtet. Erst auf einem Raspberry Pi, dann genauso auf
-dem Rechner, auf dem der Lauf über 259 Sessions gelungen war. Es liegt
-also nicht am Rechner. Die Ursache ist noch nicht geklärt; die Spur liegt
-in der Zusammenfassung und in den Abzügen von `--diagnose`.
+200 und einer Seite von rund 9 kB ohne Weiterleitung, die Sessionliste
+danach mit 302 und leerem Rumpf. Ausgegeben wurde „angemeldet als“ und
+„0 Sessions“, beides geschlossen, nichts davon beobachtet — die
+Anmeldeprüfung suchte nur ein Passwortfeld, und ein leerer 302 hat keines.
+Erst auf einem Raspberry Pi, dann genauso auf dem Rechner, auf dem der
+Lauf über 259 Sessions gelungen war; Cloudflare reicht dabei nur durch,
+ohne Prüfung. Was in der Antwort auf das Formular steht, ist noch offen.
 
 **Der JSON-Endpunkt** `/webapp/session/<id>/json`: Unter `session.meta`
 stehen `track`, `vehicle`, `indexInTheDay` (der Turn),
@@ -247,7 +260,7 @@ das waren die Indizes. Was sich nicht eindeutig als Zeit ausweist, wird
 python3 selbsttest.py
 ```
 
-615 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
+632 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
 — mit Anmeldung, Cookies, Blättern, Fahrzeugfilter und einem 5 MB großen
 Export. Geprüft wird beobachtbares Verhalten: welche Felder rausgehen, was
 im Cache landet, was bei Fehlern passiert.
@@ -260,7 +273,7 @@ Drei Dinge beim Ändern:
 - **Der Test biegt `BASIS` auf eine tote Adresse um.** Bleibt beim Ändern
   eine echte Adresse stehen, scheitert er, statt heimlich ins Netz zu gehen.
 - **Neue Prüfungen einmal absichtlich rot laufen lassen** — dafür gibt es
-  `python3 mutationen.py`. Es baut 142 Fehler ein, die ein Mensch wirklich
+  `python3 mutationen.py`. Es baut 151 Fehler ein, die ein Mensch wirklich
   machen könnte, und meldet jeden, der unbemerkt bleibt. Der volle Lauf
   kostet Minuten; gefiltert geht es schneller:
   `python3 mutationen.py statistik`, `-j 8` ändert die Nebenläufigkeit.

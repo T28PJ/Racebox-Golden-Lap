@@ -603,7 +603,8 @@ class RaceBox:
         code, kopfzeilen, rumpf = self._anfrage(
             LOGIN, {'email': email, 'password': passwort, 'redirect_to': ''},
             name='login')
-        self._abzug('login.html', rumpf.decode('utf-8', 'replace'))
+        login_html = rumpf.decode('utf-8', 'replace')
+        self._abzug('login.html', login_html)
         ziel = kopfzeilen.get('Location', '')
         if ziel:
             melde('  angenommen, Weiterleitung nach %s (wird nicht gefolgt)'
@@ -612,7 +613,31 @@ class RaceBox:
             melde('  Antwort %s ohne Weiterleitung -- eine angenommene '
                   'Anmeldung antwortet sonst mit 302' % code)
         melde('  Sessionliste holen ...')
-        html = self._text(self.liste_url(), name='sessions_seite1.html')
+        code, kopfzeilen, roh = self._anfrage(self.liste_url(),
+                                              name='sessions_seite1.html')
+        html = roh.decode('utf-8', 'replace')
+        self._abzug('sessions_seite1.html', html)
+        if code in (301, 302, 303, 307, 308):
+            # Die Liste leitet nur einen Unangemeldeten um. Was der Server
+            # auf das Formular geantwortet hat, sagt dann, woran es liegt --
+            # und zwar ohne Werte, damit man es weitergeben kann.
+            wohin = urllib.parse.urlsplit(kopfzeilen.get('Location', '')).path
+            raise AnmeldungFehlgeschlagen(
+                'Die Sessionliste leitet um nach %s -- die Anmeldung wurde '
+                'nicht angenommen.\n'
+                'Die Antwort auf das Anmeldeformular (%d Bytes) sieht so '
+                'aus:\n%s\n'
+                'Was geantwortet hat, ohne Werte, die etwas ueber das Konto '
+                'verraten:\n%s\n'
+                'Ein falsches Passwort saehe genauso aus -- neu setzen: '
+                'rb-golden-lap.py --zugang. Steht oben ein Token-Feld oder '
+                'ein Captcha, hat racebox.pro das Anmeldeverfahren '
+                'geaendert; dann hilft kein neues Passwort.\n'
+                'Mit --diagnose <ordner> legt der naechste Lauf die '
+                'Antworten vollstaendig ab.'
+                % (wohin or 'unbekannt', len(login_html),
+                   '\n'.join('  ' + z for z in seite_auswerten(login_html)),
+                   self.antworten_zusammenfassen()))
         if 'name="password"' in html:
             raise AnmeldungFehlgeschlagen(
                 'Anmeldung fehlgeschlagen -- E-Mail oder Passwort stimmen '
@@ -623,12 +648,15 @@ class RaceBox:
                 'weder einen Session-Link noch die Fahrzeugauswahl -- das '
                 'ist keine Sessionliste und kein Anmeldeformular. Ob die '
                 'Anmeldung angenommen wurde, laesst sich so nicht sagen.\n'
+                'Sie sieht so aus:\n%s\n'
                 'Was geantwortet hat, ohne Werte, die etwas ueber das Konto '
                 'verraten:\n%s\n'
                 'Mit --diagnose <ordner> legt der naechste Lauf Kopfzeilen '
                 'und Antworten vollstaendig ab (login.kopfzeilen, '
                 'login.html, sessions_seite1.html.kopfzeilen).'
-                % (len(html), self.antworten_zusammenfassen()))
+                % (len(html),
+                   '\n'.join('  ' + z for z in seite_auswerten(html)),
+                   self.antworten_zusammenfassen()))
         melde('  Sessionliste: %d Bytes, kein Anmeldeformular' % len(html))
         return html
 
@@ -1432,6 +1460,93 @@ OPTION_MUSTER = re.compile(
     r'<option\b[^>]*\bvalue\s*=\s*["\']?(?P<wert>[^"\'>\s]*)["\']?[^>]*>'
     r'(?P<text>.*?)</option>', re.S | re.I)
 TAGS = re.compile(r'<[^>]+>')
+
+# Fuer die Auswertung einer Seite, die keine Sessionliste ist: Was fuer ein
+# Formular steht da, welche Felder hat es, woher kommen die Skripte. Nur
+# Namen, nie Werte -- ein verstecktes Feld traegt das Token, das man nicht
+# weitergeben will.
+TITEL_MUSTER = re.compile(r'<title[^>]*>(.*?)</title>', re.I | re.S)
+FORM_MUSTER = re.compile(r'<form\b([^>]*)>(.*?)</form>', re.I | re.S)
+INPUT_MUSTER = re.compile(r'<(?:input|select|textarea|button)\b[^>]*>', re.I)
+ATTRIBUT_MUSTER = re.compile(
+    r'\b(?P<name>[a-zA-Z-]+)\s*=\s*(?:"(?P<a>[^"]*)"|\'(?P<b>[^\']*)\'|(?P<c>[^\s>]+))')
+SKRIPT_MUSTER = re.compile(r'<script\b[^>]*\bsrc\s*=\s*["\']?([^"\'\s>]+)', re.I)
+# Woran man ein Token-Feld und ein Captcha erkennt. Das eine steht im Namen
+# eines Feldes, das andere irgendwo in der Seite -- meist im Skript-Host.
+TOKEN_WORTE = ('csrf', 'token', 'nonce')
+CAPTCHA_WORTE = ('turnstile', 'challenges.cloudflare.com', 'hcaptcha',
+                 'recaptcha', 'captcha')
+# Woerter, die im sichtbaren Text eine Fehlermeldung des Servers verraten.
+FEHLER_WORTE = ('invalid', 'incorrect', 'wrong', 'error', 'failed', 'expired',
+                'ungueltig', 'ungültig', 'falsch', 'fehler')
+
+
+def attribute(tag):
+    """{name: wert} eines Tags, Namen kleingeschrieben."""
+    return {t.group('name').lower():
+            (t.group('a') if t.group('a') is not None else
+             t.group('b') if t.group('b') is not None else t.group('c'))
+            for t in ATTRIBUT_MUSTER.finditer(tag)}
+
+
+def seite_auswerten(html):
+    """Was fuer eine Seite das ist -- als Zeilen ohne verraeterische Werte.
+
+    Titel, jedes Formular mit Methode, Pfad und Feldnamen, die Hosts der
+    eingebundenen Skripte, dazu die Merkmale: Anmeldeformular, Token-Feld,
+    Captcha, Fehlerwoerter im Text. Feldwerte, Parameter und der Text
+    selbst bleiben draussen. Kommt statt HTML Zeichensalat, steht das da,
+    denn dann ist die Antwort vermutlich komprimiert und nicht entpackt.
+    """
+    zeilen = []
+    unlesbar = html.count('\ufffd')
+    if html and (unlesbar > len(html) / 20 or '<' not in html):
+        zeilen.append('kein lesbares HTML (%d Bytes, %d unlesbare Zeichen) '
+                      '-- vermutlich komprimiert angekommen und nicht '
+                      'entpackt' % (len(html), unlesbar))
+        return zeilen
+    titel = TITEL_MUSTER.search(html)
+    zeilen.append('Titel: %s' % (' '.join(TAGS.sub('', titel.group(1)).split())
+                                 if titel else 'keiner'))
+    merkmale = []
+    for f in FORM_MUSTER.finditer(html):
+        attr = attribute(f.group(1))
+        felder = []
+        for tag in INPUT_MUSTER.findall(f.group(2)):
+            a = attribute(tag)
+            name = a.get('name') or a.get('id')
+            if not name:
+                continue             # ohne Namen wird nichts mitgeschickt
+            typ = (a.get('type') or '').lower()
+            felder.append(name + (' (%s)' % typ if typ in ('hidden', 'password') else ''))
+            if typ == 'password':
+                merkmale.append('Anmeldeformular')
+            if any(w in name.lower() for w in TOKEN_WORTE):
+                merkmale.append('Token-Feld')
+        zeilen.append('Formular: %s %s, Felder: %s'
+                      % ((attr.get('method') or 'get').upper(),
+                         urllib.parse.urlsplit(attr.get('action') or '').path
+                         or '(diese Seite)',
+                         ', '.join(felder) or 'keine'))
+    if not FORM_MUSTER.search(html):
+        zeilen.append('Formular: keines')
+    hosts = []
+    for src in SKRIPT_MUSTER.findall(html):
+        host = urllib.parse.urlsplit(src).hostname
+        if host and host not in hosts:
+            hosts.append(host)
+    zeilen.append('Skripte von: %s' % (', '.join(hosts) or 'nur eigene'))
+    klein = html.lower()
+    for wort in CAPTCHA_WORTE:
+        if wort in klein:
+            merkmale.append('Captcha (%s)' % wort)
+            break
+    text = TAGS.sub(' ', re.sub(r'<(script|style)\b.*?</\1>', ' ', html,
+                                flags=re.I | re.S)).lower()
+    gefunden = [w for w in FEHLER_WORTE if w in text]
+    zeilen.append('Merkmale: %s' % (', '.join(dict.fromkeys(merkmale)) or 'keine'))
+    zeilen.append('Fehlerwoerter im Text: %s' % (', '.join(gefunden) or 'keine'))
+    return zeilen
 
 
 def fahrzeugauswahl(html):

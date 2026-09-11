@@ -2387,6 +2387,23 @@ TOTES_ZIEL = 'http://127.0.0.1:1/nach-dem-anmelden'
 JUNK = 5 * 1024 * 1024          # so gross, dass ein Abbruch auffaellt
 
 
+# Ein Anmeldeformular, wie es ein umgebautes racebox.pro schicken koennte:
+# mit Token-Feld, Captcha-Skript und einer Fehlermeldung. Werte darin
+# duerfen in keiner Ausgabe des Werkzeugs auftauchen.
+UMGEBAUTES_FORMULAR = (
+    '<html><head><title>Login - RaceBox</title>'
+    '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js">'
+    '</script><script src="/js/app.js"></script></head><body>'
+    '<form method="post" action="/webapp/login?next=%2Fwebapp%2Fsessions">'
+    '<input name="email" value="wer@wo.de">'
+    '<input type="password" name="password">'
+    '<input type="hidden" name="_token" value="TOKENWERT">'
+    '<div class="cf-turnstile"></div>'
+    '<button type="submit">Log in</button></form>'
+    '<p class="error">Invalid token, please try again.</p>'
+    '</body></html>')
+
+
 class Zustand:
     def __init__(self):
         self.export_felder = None
@@ -2399,6 +2416,7 @@ class Zustand:
         self.ohne_erste = set()   # Sessions, deren CSV die erste Runde nicht listet
         self.stumm = False        # antwortet auf Login und Liste mit 200 und nichts
         self.leer = False         # ein Konto ohne Sessions
+        self.umgebaut = False     # Login verlangt Token und Captcha
         self.kennungen = set()
         self.pfade = []
         self.geschrieben = 0
@@ -2469,6 +2487,11 @@ class Griff(BaseHTTPRequestHandler):
         self.zustand.pfade.append(self.path)
         felder = self._felder()
         if self.path == '/webapp/login':
+            if self.zustand.umgebaut:
+                # Der Fall vom September 2026: 200 mit einer Seite, ein
+                # Keks, keine Weiterleitung -- und die Liste danach ein 302.
+                return self._antwort(UMGEBAUTES_FORMULAR,
+                                     kekse='racebox=GEHEIMSITZUNG; Path=/')
             if self.zustand.stumm:
                 # Der Fall vom Raspberry Pi: 200, keine Weiterleitung, kein
                 # Rumpf -- und die Liste danach genauso. Dazu ein Keks und
@@ -2504,6 +2527,13 @@ class Griff(BaseHTTPRequestHandler):
     def _sessions(self, frage):
         if self.zustand.stumm:
             return self._antwort('')
+        if self.zustand.umgebaut:
+            self.send_response(302)
+            self.send_header('Location', '/webapp/login?redirect_to='
+                             '%2Fwebapp%2Fsessions%3Ftype%3Dtrack')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         if not self._angemeldet():
             return self._antwort(self._formular())
         vid = (frage.get('vid') or ['all'])[0]
@@ -2994,6 +3024,55 @@ def test_stumme_antwort():
                ['Kekse (nur Namen): keine',
                 'weitere Kopfzeilen (nur Namen): keine'],
                'ohne Kopfzeilen sagt die Zusammenfassung das auch')
+        pruefe('Sie sieht so aus:' in meldung and 'Formular: keines' in meldung,
+               'die stumme Antwort wird als Seite ausgewertet: kein Formular')
+
+        # -- ein umgebautes Anmeldeverfahren: 200 mit Seite, Liste 302 ----
+        zustand.stumm, zustand.umgebaut = False, True
+        rb4 = S.RaceBox(basis, zeitgrenze=5)
+        fehler = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                rb4.anmelden(EMAIL, PASSWORT)
+            except S.AnmeldungFehlgeschlagen as e:
+                fehler = str(e)
+        pruefe(fehler is not None,
+               'eine Umleitung der Sessionliste gilt als abgelehnte Anmeldung')
+        meldung = fehler or ''
+        pruefe('leitet um nach /webapp/login' in meldung,
+               'die Meldung nennt das Ziel der Umleitung')
+        pruefe('redirect_to' not in meldung, 'aber ohne seine Parameter')
+        pruefe('Titel: Login - RaceBox' in meldung,
+               'und wertet die Login-Seite aus: Titel')
+        pruefe('Formular: POST /webapp/login, Felder: email, '
+               'password (password), _token (hidden)' in meldung,
+               'Formular mit Methode, Pfad und Feldnamen')
+        pruefe('next=' not in meldung, 'der Pfad ohne Parameter')
+        pruefe('TOKENWERT' not in meldung and 'wer@wo.de' not in meldung,
+               'Feldwerte stehen nicht drin')
+        pruefe('Skripte von: challenges.cloudflare.com' in meldung,
+               'fremde Skript-Hosts stehen drin, eigene nicht')
+        # Nicht bloss das Wort suchen: "Token-Feld" steht auch im festen
+        # Text der Meldung. Die Merkmalszeile muss es sein.
+        pruefe('Merkmale: Anmeldeformular, Token-Feld, Captcha (turnstile)'
+               in meldung,
+               'Anmeldeformular, Token-Feld und Captcha sind als Merkmale '
+               'erkannt')
+        pruefe('Fehlerwoerter im Text: invalid' in meldung,
+               'und das Fehlerwort aus dem sichtbaren Text')
+        pruefe('please try again' not in meldung,
+               'der Text selbst wird nicht wiedergegeben')
+        pruefe('GEHEIMSITZUNG' not in meldung and 'racebox' in meldung,
+               'der Keks steht mit Namen drin, nie mit Wert')
+        pruefe('--zugang' in meldung, 'das falsche Passwort bleibt genannt')
+        pruefe('kein neues Passwort' in meldung,
+               'und ebenso, wann es nicht hilft')
+
+        zeilen = S.seite_auswerten('\x1f\ufffd\ufffd\x00salat\ufffd')
+        pruefe(len(zeilen) == 1 and 'kein lesbares HTML' in zeilen[0],
+               'Zeichensalat wird als solcher benannt')
+        pruefe('nicht entpackt' in zeilen[0], 'mit dem Verdacht auf Kompression')
+        zustand.umgebaut = False
         pruefe('angemeldet als' not in puffer.getvalue(),
                'und nennt niemanden angemeldet')
 
