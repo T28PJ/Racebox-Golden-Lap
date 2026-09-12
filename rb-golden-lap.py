@@ -126,6 +126,7 @@ def daten_ordner():
 
 ORDNER = daten_ordner()
 ZUGANG = os.path.join(ORDNER, 'zugang')
+SITZUNG = os.path.join(ORDNER, 'sitzung')
 CACHE = os.path.join(ORDNER, 'cache')
 # Getrennt vom Cache: Der Cache ist Rechengrundlage und darf jederzeit weg,
 # das Archiv sind die Originalexporte und soll bleiben.
@@ -190,6 +191,14 @@ class AnmeldungFehlgeschlagen(SystemExit):
     """
 
 
+class SitzungAbgelaufen(AnmeldungFehlgeschlagen):
+    """Die Kekse aus dem Browser gelten nicht mehr.
+
+    Dieselbe Behandlung wie eine abgelehnte Anmeldung, aber ein anderer
+    Rat: nicht das Passwort neu setzen, sondern die Sitzung.
+    """
+
+
 # --- Zahlen und Zeiten ----------------------------------------------------
 
 def zahl(text):
@@ -248,6 +257,22 @@ lesen). Wer das nicht will, setzt stattdessen die Umgebungsvariablen
 RACEBOX_EMAIL und RACEBOX_PASSWORT -- dann wird nichts gespeichert.
 """
 
+SITZUNG_HILFE = """\
+Die Anmeldung bei racebox.pro verlangt seit September 2026 ein Captcha,
+das nur ein Browser besteht. Das Werkzeug uebernimmt deshalb die Sitzung
+aus dem Browser:
+  1. Im Browser bei https://www.racebox.pro anmelden.
+  2. F12 druecken. Firefox: Reiter "Web-Speicher" > Cookies >
+     https://www.racebox.pro. Chrome und Edge: Reiter "Anwendung" >
+     Cookies > https://www.racebox.pro.
+  3. Den Wert des Kekses "racebox" kopieren und hier einfuegen. Die
+     Eingabe bleibt verdeckt, wie beim Passwort.
+Der Wert liegt danach im Klartext in %s (Rechte 0600, nur du darfst
+lesen). Wer das nicht will, setzt stattdessen die Umgebungsvariable
+RACEBOX_SITZUNG. Gilt die Sitzung nicht mehr, sagt das Werkzeug Bescheid;
+dann im Browser neu anmelden und --sitzung wiederholen.
+"""
+
 
 def ordner_anlegen(ordner):
     """Anlegen, und bei einem schreibgeschuetzten Ort klar sagen, warum nicht.
@@ -302,7 +327,51 @@ def zugang_fragen():
     return email, passwort
 
 
+def sitzung_lesen(neu=False):
+    """Die Kekse der Browsersitzung: Umgebung, Datei, sonst None.
+
+    Return {name: wert} oder None -- dann bleibt der Weg ueber das
+    Anmeldeformular. Mit `neu` wird gefragt und abgelegt.
+    """
+    if neu:
+        return sitzung_fragen()
+    if os.environ.get('RACEBOX_SITZUNG'):
+        return {'racebox': os.environ['RACEBOX_SITZUNG']}
+    if os.path.exists(SITZUNG):
+        kekse = {}
+        with open(SITZUNG, encoding='utf-8') as f:
+            for zeile in f:
+                if zeile.strip() and not zeile.lstrip().startswith('#'):
+                    name, _, wert = zeile.partition('=')
+                    if name.strip() and wert.strip():
+                        kekse[name.strip()] = wert.strip()
+        if kekse:
+            return kekse
+    return None
+
+
+def sitzung_fragen():
+    """Den Keks aus dem Browser erfragen und ablegen, verdeckt wie ein Passwort."""
+    import getpass
+    melde(SITZUNG_HILFE % SITZUNG)
+    wert = getpass.getpass('Wert des Kekses racebox (leer = abbrechen): ').strip()
+    if not wert:
+        raise SystemExit('Ohne den Keks gibt es keine Sitzung.')
+
+    ordner_anlegen(ORDNER)
+    # Erst die Rechte, dann der Inhalt -- wie bei `zugang`: Der Keks ist
+    # eine angemeldete Sitzung, also so viel wert wie das Passwort.
+    fd = os.open(SITZUNG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write('racebox = %s\n' % wert)
+    melde('Abgelegt in %s' % SITZUNG)
+    return {'racebox': wert}
+
+
 # --- Die Sitzung auf racebox.pro ------------------------------------------
+
+# Statuscodes, mit denen die Sessionliste einen Unangemeldeten wegschickt.
+UMLEITUNGEN = (301, 302, 303, 307, 308)
 
 # Ein Verbindungsaufbau, der laenger dauert als das, ist keiner mehr. Der
 # Wert entscheidet ueber Minuten: Loest ein Rechner eine IPv6-Adresse auf,
@@ -617,7 +686,7 @@ class RaceBox:
                                               name='sessions_seite1.html')
         html = roh.decode('utf-8', 'replace')
         self._abzug('sessions_seite1.html', html)
-        if code in (301, 302, 303, 307, 308):
+        if code in UMLEITUNGEN:
             # Die Liste leitet nur einen Unangemeldeten um. Was der Server
             # auf das Formular geantwortet hat, sagt dann, woran es liegt --
             # und zwar ohne Werte, damit man es weitergeben kann.
@@ -632,7 +701,8 @@ class RaceBox:
                 'Ein falsches Passwort saehe genauso aus -- neu setzen: '
                 'rb-golden-lap.py --zugang. Steht oben ein Token-Feld oder '
                 'ein Captcha, hat racebox.pro das Anmeldeverfahren '
-                'geaendert; dann hilft kein neues Passwort.\n'
+                'geaendert; dann hilft kein neues Passwort, sondern die '
+                'Sitzung aus dem Browser: rb-golden-lap.py --sitzung\n'
                 'Mit --diagnose <ordner> legt der naechste Lauf die '
                 'Antworten vollstaendig ab.'
                 % (wohin or 'unbekannt', len(login_html),
@@ -642,6 +712,38 @@ class RaceBox:
             raise AnmeldungFehlgeschlagen(
                 'Anmeldung fehlgeschlagen -- E-Mail oder Passwort stimmen '
                 'nicht. Neu setzen: rb-golden-lap.py --zugang')
+        self._sessionliste_pruefen(html)
+        melde('  Sessionliste: %d Bytes, kein Anmeldeformular' % len(html))
+        return html
+
+    def sitzung_uebernehmen(self, kekse):
+        """Mit den Keksen aus dem Browser die Sessionliste holen.
+
+        Der Weg um das Captcha herum, ohne es zu umgehen: Der Browser hat
+        es bestanden, das Werkzeug fuehrt dessen Sitzung fort. Ob sie noch
+        gilt, zeigt die Liste selbst -- ein Unangemeldeter wird umgeleitet
+        oder bekommt das Formular.
+        """
+        self.kekse.update(kekse)
+        melde('  Sessionliste mit der Sitzung aus dem Browser holen ...')
+        code, kopfzeilen, roh = self._anfrage(self.liste_url(),
+                                              name='sessions_seite1.html')
+        html = roh.decode('utf-8', 'replace')
+        self._abzug('sessions_seite1.html', html)
+        if code in UMLEITUNGEN or 'name="password"' in html:
+            wohin = urllib.parse.urlsplit(kopfzeilen.get('Location', '')).path
+            raise SitzungAbgelaufen(
+                'Die Sitzung aus dem Browser gilt nicht mehr: Die '
+                'Sessionliste %s.\nIm Browser neu anmelden und den Keks '
+                'neu setzen: rb-golden-lap.py --sitzung'
+                % ('leitet um nach %s' % (wohin or 'unbekannt')
+                   if code in UMLEITUNGEN else 'zeigt das Anmeldeformular'))
+        self._sessionliste_pruefen(html)
+        melde('  Sessionliste: %d Bytes, kein Anmeldeformular' % len(html))
+        return html
+
+    def _sessionliste_pruefen(self, html):
+        """Abbrechen, wenn die Seite weder Liste noch Formular ist."""
         if not ist_sessionliste(html):
             raise SystemExit(
                 'Die Sessionliste kam mit %d Bytes zurueck und enthaelt '
@@ -657,8 +759,6 @@ class RaceBox:
                 % (len(html),
                    '\n'.join('  ' + z for z in seite_auswerten(html)),
                    self.antworten_zusammenfassen()))
-        melde('  Sessionliste: %d Bytes, kein Anmeldeformular' % len(html))
-        return html
 
     def antworten_zusammenfassen(self):
         """Die bisherigen Antworten als Text, den man weitergeben kann.
@@ -3337,15 +3437,20 @@ def fahrzeugkarte(rb, gesucht, fahrzeuge, melden=True):
 
 def abgleichen(rb, email, passwort, cache_ordner=None, neu=False,
                gleichzeitig=5, fahrzeug=None, seit=None, csv_weg=False,
-               mit_csv=True, csv_ordner=None):
+               mit_csv=True, csv_ordner=None, sitzung=None):
     """Anmelden, fehlende Sessions holen, in den Cache legen.
 
+    Mit `sitzung` (die Kekse aus dem Browser) faellt die Anmeldung weg.
     Return die Zahl der neu geholten Sessions.
     """
     melde('Anmelden bei %s (Zeitgrenze %d s je Anfrage) ...'
           % (rb.basis, rb.zeitgrenze))
-    html = rb.anmelden(email, passwort)
-    melde('  angemeldet als %s' % email)
+    if sitzung:
+        html = rb.sitzung_uebernehmen(sitzung)
+        melde('  angemeldet ueber die Sitzung aus dem Browser')
+    else:
+        html = rb.anmelden(email, passwort)
+        melde('  angemeldet als %s' % email)
 
     vorhanden = cache_lesen(cache_ordner)
     melde('Sessionliste durchgehen ...')
@@ -3670,6 +3775,9 @@ def argumente(argv=None):
                    help='alle Sessions neu holen, auch die schon bekannten')
     p.add_argument('--zugang', action='store_true',
                    help='E-Mail und Passwort neu setzen')
+    p.add_argument('--sitzung', action='store_true',
+                   help='die Sitzung aus dem Browser uebernehmen '
+                        '(Keks "racebox" neu setzen)')
     p.add_argument('--turns', type=int, default=3, metavar='N',
                    help='so viele Turns in der Detailansicht (Vorgabe 3)')
     p.add_argument('--cache', metavar='ORDNER', help='anderer Cache-Ordner')
@@ -3714,15 +3822,21 @@ def main(argv=None):
     cache_ordner = a.cache or CACHE
 
     holen = not a.nur_cache
-    if holen and not a.neu and not a.zugang:
+    if holen and not a.neu and not a.zugang and not a.sitzung:
         holen = soll_holen(cache_ordner)
     if holen:
-        email, passwort = zugang_lesen(neu=a.zugang)
+        # Liegt eine Sitzung aus dem Browser vor, geht es ueber sie; das
+        # Formular bleibt der Weg fuer den Fall, dass racebox.pro das
+        # Captcha wieder abbaut. --zugang erzwingt ihn fuer diesen Lauf.
+        sitzung = None if a.zugang else sitzung_lesen(neu=a.sitzung)
+        email = passwort = None
+        if not sitzung:
+            email, passwort = zugang_lesen(neu=a.zugang)
         rb = RaceBox(a.basis, a.diagnose, a.zeitgrenze, a.ipv4)
         try:
             abgleichen(rb, email, passwort, cache_ordner, a.neu,
                        max(1, a.gleichzeitig), a.fahrzeug, a.seit, a.csv,
-                       not a.ohne_csv)
+                       not a.ohne_csv, sitzung=sitzung)
         except AnmeldungFehlgeschlagen as e:
             raise SystemExit(str(e))
 

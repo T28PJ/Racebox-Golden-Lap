@@ -54,6 +54,25 @@ python.exe .\rb-golden-lap.py       # Windows
 
 Beim ersten Start werden E-Mail und Passwort des RaceBox-Kontos abgefragt.
 
+**Seit September 2026 reicht das nicht mehr.** racebox.pro hat ein
+Captcha (Cloudflare Turnstile) in die Anmeldung eingebaut, das nur ein
+Browser besteht. Das Werkzeug übernimmt deshalb die Sitzung aus dem
+Browser:
+
+```sh
+python3 rb-golden-lap.py --sitzung
+```
+
+Vorher im Browser bei racebox.pro anmelden, dann F12 drücken und den Wert
+des Cookies `racebox` kopieren — in Firefox unter „Web-Speicher“, in
+Chrome und Edge unter „Anwendung“, jeweils bei Cookies für
+`https://www.racebox.pro`. Das Werkzeug fragt den Wert verdeckt ab und legt
+ihn in `sitzung` ab. Danach läuft jeder Start ohne Passwort und ohne
+Formular. Gilt die Sitzung nicht mehr, sagt das Werkzeug Bescheid; dann
+im Browser neu anmelden und `--sitzung` wiederholen. Der Weg über
+E-Mail und Passwort bleibt erhalten: `--zugang` erzwingt ihn, falls
+racebox.pro das Captcha wieder abbaut.
+
 **Der erste Lauf holt alles**, danach nur noch den Zuwachs — eine
 aufgezeichnete Session ändert sich nicht mehr. Wie lange das dauert, sagt
 das Werkzeug vorher an. Bei jedem weiteren Start fragt es zuerst, ob
@@ -80,7 +99,8 @@ ein zulässiges Passwort; der Ausgang ist die leere Eingabe.
 | `--fahrzeug "Yamaha*"` | nur Sessions dieses Fahrzeugs |
 | `--seit 2026-01-01` | nur Sessions ab diesem Tag holen |
 | `--turns 20` | mehr Turns in der Detailansicht (Vorgabe 3) |
-| `--zugang` | E-Mail und Passwort neu setzen |
+| `--zugang` | E-Mail und Passwort neu setzen, und für diesen Lauf über das Formular anmelden |
+| `--sitzung` | die Sitzung aus dem Browser übernehmen (Cookie `racebox` neu setzen) |
 | `--gleichzeitig 8` | mehr Sessions gleichzeitig holen (Vorgabe 5) |
 | `--ipv4` | nur IPv4 verwenden, falls IPv6 im Netz nicht trägt |
 | `--zeitgrenze 120` | länger als 30 s je Anfrage warten |
@@ -258,6 +278,7 @@ im Benutzerprofil, den man ein halbes Jahr später nicht wiederfindet:
 C:\Rennstrecke\Golden Lap\
     rb-golden-lap.py
     zugang                                 <- E-Mail und Passwort
+    sitzung                                <- der Cookie aus dem Browser
     cache\
         a1b2c3d4e5f60718293a4b5c.json      <- eine Datei je Session
     csv-exports\                           <- die Originalexporte
@@ -268,12 +289,14 @@ Die Übersicht nennt den Ordner in ihrer letzten Zeile.
 `RB_GOLDEN_LAP_DIR` verlegt beides, `--cache` nur den Cache. Löschen ist
 gefahrlos — beim nächsten Start ist alles wieder da.
 
-**Das Passwort steht im Klartext in `zugang`.** Die Datei wird mit den
-Rechten `0600` angelegt — unter Linux und macOS heißt das: nur du darfst
-lesen. **Unter Windows greift das nicht**, dort setzt Python keine ACL; was
-schützt, ist allein der Ordner. Wer nichts gespeichert haben will, setzt
-stattdessen `RACEBOX_EMAIL` und `RACEBOX_PASSWORT` als Umgebungsvariablen —
-dann wird nichts geschrieben und nichts gelesen.
+**Das Passwort steht im Klartext in `zugang`, der Cookie in `sitzung`.**
+Beide Dateien werden mit den Rechten `0600` angelegt — unter Linux und
+macOS heißt das: nur du darfst lesen. **Unter Windows greift das nicht**,
+dort setzt Python keine ACL; was schützt, ist allein der Ordner. Der
+Cookie ist eine angemeldete Sitzung und damit so viel wert wie das
+Passwort. Wer nichts gespeichert haben will, setzt stattdessen
+`RACEBOX_EMAIL` und `RACEBOX_PASSWORT` beziehungsweise `RACEBOX_SITZUNG`
+als Umgebungsvariablen — dann wird nichts geschrieben und nichts gelesen.
 
 ## Was die Zahlen ehrlich hält
 

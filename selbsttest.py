@@ -2446,7 +2446,10 @@ class Griff(BaseHTTPRequestHandler):
         self.wfile.write(roh)
 
     def _angemeldet(self):
-        return 'auth=1' in (self.headers.get('Cookie') or '')
+        # auth=1 setzt die Anmeldung ueber das Formular; racebox=... ist die
+        # Sitzung, die ein Browser mitbringt.
+        kekse = self.headers.get('Cookie') or ''
+        return 'auth=1' in kekse or 'racebox=BROWSERSITZUNG' in kekse
 
     def _formular(self):
         return ('<html><body><form method="post">'
@@ -2527,15 +2530,15 @@ class Griff(BaseHTTPRequestHandler):
     def _sessions(self, frage):
         if self.zustand.stumm:
             return self._antwort('')
-        if self.zustand.umgebaut:
+        if not self._angemeldet():
+            if not self.zustand.umgebaut:
+                return self._antwort(self._formular())
             self.send_response(302)
             self.send_header('Location', '/webapp/login?redirect_to='
                              '%2Fwebapp%2Fsessions%3Ftype%3Dtrack')
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
-        if not self._angemeldet():
-            return self._antwort(self._formular())
         vid = (frage.get('vid') or ['all'])[0]
         seite = int((frage.get('page') or ['1'])[0])
         def wann(eintrag):
@@ -3067,6 +3070,8 @@ def test_stumme_antwort():
         pruefe('--zugang' in meldung, 'das falsche Passwort bleibt genannt')
         pruefe('kein neues Passwort' in meldung,
                'und ebenso, wann es nicht hilft')
+        pruefe('--sitzung' in meldung,
+               'und was dann hilft: die Sitzung aus dem Browser')
 
         zeilen = S.seite_auswerten('\x1f\ufffd\ufffd\x00salat\ufffd')
         pruefe(len(zeilen) == 1 and 'kein lesbares HTML' in zeilen[0],
@@ -3137,6 +3142,148 @@ def test_stumme_antwort():
         os.environ.pop('RACEBOX_PASSWORT', None)
         shutil.rmtree(diag)
         shutil.rmtree(cache)
+        server.shutdown()
+
+
+def test_sitzung_aus_dem_browser():
+    """Das Captcha besteht der Browser; das Werkzeug fuehrt seine Sitzung fort.
+
+    Der Keks kommt aus der Umgebung oder aus der Datei `sitzung`, wird
+    verdeckt erfragt und mit 0600 abgelegt. Mit ihm faellt das
+    Anmeldeformular weg. Gilt er nicht mehr, sagt das Werkzeug, was zu
+    tun ist -- und raet nicht zum Passwort.
+    """
+    import getpass
+    server, basis, zustand = server_starten()
+    zustand.umgebaut = True
+    echte_basis, S.BASIS = S.BASIS, 'http://127.0.0.1:1/verboten'
+    ordner = tempfile.mkdtemp()
+    echte_sitzung, S.SITZUNG = S.SITZUNG, os.path.join(ordner, 'sitzung')
+    echter_ordner, S.ORDNER = S.ORDNER, ordner
+    echtes_getpass = getpass.getpass
+    cache = os.path.join(ordner, 'cache')
+    try:
+        # -- lesen: Umgebung, Datei, sonst nichts -------------------------
+        os.environ.pop('RACEBOX_SITZUNG', None)
+        gleich(S.sitzung_lesen(), None, 'ohne Datei und Umgebung keine Sitzung')
+        os.environ['RACEBOX_SITZUNG'] = 'AUSDERUMGEBUNG'
+        gleich(S.sitzung_lesen(), {'racebox': 'AUSDERUMGEBUNG'},
+               'RACEBOX_SITZUNG ist der Keks racebox')
+        os.environ.pop('RACEBOX_SITZUNG')
+        with open(S.SITZUNG, 'w', encoding='utf-8') as f:
+            f.write('# aus dem Browser\nracebox = BROWSERSITZUNG\n'
+                    '__cflb = EGAL\n\n')
+        gleich(S.sitzung_lesen(), {'racebox': 'BROWSERSITZUNG', '__cflb': 'EGAL'},
+               'die Datei liefert jeden Keks, Kommentare und Leerzeilen nicht')
+        os.remove(S.SITZUNG)
+
+        # -- fragen: verdeckt, mit Ausgang, mit 0600 -----------------------
+        gefragt = []
+        def antworten(frage=''):
+            gefragt.append(frage)
+            return ''
+        getpass.getpass = antworten
+        try:
+            still(S.sitzung_fragen)
+            pruefe(False, 'ohne Keks bricht die Sitzungsfrage ab')
+        except SystemExit:
+            pruefe(True, 'ohne Keks bricht die Sitzungsfrage ab')
+        pruefe(gefragt and 'leer = abbrechen' in gefragt[0],
+               'und die Zeile nennt diesen Ausgang')
+        getpass.getpass = lambda frage='': '  BROWSERSITZUNG \n'
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            gleich(S.sitzung_fragen(), {'racebox': 'BROWSERSITZUNG'},
+                   'die Frage liefert den Keks, ohne Raender')
+        pruefe('racebox.pro anmelden' in puffer.getvalue()
+               and 'F12' in puffer.getvalue(),
+               'davor steht, wo der Keks im Browser zu finden ist')
+        with open(S.SITZUNG, encoding='utf-8') as f:
+            gleich(f.read(), 'racebox = BROWSERSITZUNG\n',
+                   'und er liegt in der Datei')
+        if os.name == 'posix':
+            gleich(os.stat(S.SITZUNG).st_mode & 0o777, 0o600,
+                   'mit Rechten nur fuer den Besitzer')
+
+        # -- holen mit der Sitzung: kein Formular, alle Sessions -----------
+        zustand.pfade.clear()
+        rb = S.RaceBox(basis, zeitgrenze=5)
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            geholt = S.abgleichen(rb, None, None, cache, neu=True,
+                                  gleichzeitig=3,
+                                  sitzung={'racebox': 'BROWSERSITZUNG'})
+        gleich(geholt, len(TESTSESSIONS),
+               'mit der Sitzung aus dem Browser kommen alle Sessions')
+        pruefe('/webapp/login' not in zustand.pfade,
+               'ohne dass das Anmeldeformular angefasst wird')
+        pruefe('Sitzung aus dem Browser' in puffer.getvalue()
+               and 'angemeldet als' not in puffer.getvalue(),
+               'die Ausgabe sagt, worueber angemeldet wurde')
+
+        # -- eine abgelaufene Sitzung ---------------------------------------
+        for umgebaut, erwartet in ((True, 'leitet um nach /webapp/login'),
+                                   (False, 'zeigt das Anmeldeformular')):
+            zustand.umgebaut = umgebaut
+            fehler = None
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    S.RaceBox(basis, zeitgrenze=5).sitzung_uebernehmen(
+                        {'racebox': 'ABGELAUFEN'})
+                except S.SitzungAbgelaufen as e:
+                    fehler = str(e)
+            pruefe(fehler is not None and 'gilt nicht mehr' in fehler,
+                   'eine abgelaufene Sitzung wird erkannt (%s)' % erwartet)
+            pruefe(fehler and erwartet in fehler, 'mit dem Grund: ' + erwartet)
+            pruefe(fehler and '--sitzung' in fehler and '--zugang' not in fehler,
+                   'und dem Rat, die Sitzung zu erneuern, nicht das Passwort')
+        zustand.umgebaut = True
+
+        # -- der ganze Lauf: --sitzung fragt und legt ab, danach nicht mehr -
+        os.remove(S.SITZUNG)
+        os.environ.pop('RACEBOX_EMAIL', None)
+        os.environ.pop('RACEBOX_PASSWORT', None)
+        shutil.rmtree(cache, ignore_errors=True)
+        zustand.pfade.clear()
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            S.main(['--sitzung', '--basis', basis, '--cache', cache])
+        pruefe('Talkurs' in puffer.getvalue(),
+               '--sitzung fragt den Keks ab und laeuft durch bis zur Uebersicht')
+        pruefe(os.path.exists(S.SITZUNG), 'der Keks liegt danach in der Datei')
+        pruefe('/webapp/login' not in zustand.pfade,
+               'das Anmeldeformular wurde nicht angefasst')
+
+        getpass.getpass = lambda frage='': 'DARF-NICHT-GEFRAGT-WERDEN'
+        zustand.pfade.clear()
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            S.main(['--neu', '--basis', basis, '--cache', cache])
+        pruefe('Sitzung aus dem Browser' in puffer.getvalue()
+               and '/webapp/login' not in zustand.pfade,
+               'beim naechsten Lauf reicht die Datei, ohne Passwort und Formular')
+
+        # -- --zugang erzwingt den Weg ueber das Formular -----------------
+        os.environ['RACEBOX_EMAIL'] = EMAIL
+        os.environ['RACEBOX_PASSWORT'] = PASSWORT
+        zustand.umgebaut = False
+        zustand.pfade.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.main(['--neu', '--basis', basis, '--cache', cache])
+        pruefe('/webapp/login' not in zustand.pfade,
+               'mit Sitzung und Passwort zaehlt die Sitzung')
+        zustand.pfade.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.main(['--zugang', '--basis', basis, '--cache', cache])
+        pruefe('/webapp/login' in zustand.pfade,
+               '--zugang geht ueber das Formular, auch wenn eine Sitzung da ist')
+    finally:
+        getpass.getpass = echtes_getpass
+        S.BASIS, S.SITZUNG, S.ORDNER = echte_basis, echte_sitzung, echter_ordner
+        os.environ.pop('RACEBOX_SITZUNG', None)
+        os.environ.pop('RACEBOX_EMAIL', None)
+        os.environ.pop('RACEBOX_PASSWORT', None)
+        shutil.rmtree(ordner)
         server.shutdown()
 
 
