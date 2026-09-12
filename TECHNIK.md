@@ -44,9 +44,26 @@ jederzeit ändern. Vier Punkte, die man beim Ändern kennen muss:
 `curl`, ein eigener Name und Browser kommen durch.
 
 **Anmelden** ist ein POST auf `/webapp/login` mit `email`, `password`,
-`redirect_to`. Kein Captcha, kein CSRF-Token. Ob es geklappt hat, sagt der
-Statuscode nicht — die Seite antwortet auch mit 200, wenn sie nur wieder
-das Formular zeigt.
+`redirect_to`. Kein CSRF-Token. Ob es geklappt hat, sagt der Statuscode
+nicht — die Seite antwortet auch mit 200, wenn sie nur wieder das Formular
+zeigt.
+
+**Seit September 2026 steckt ein Cloudflare-Turnstile im Formular.** Das
+Skript von `challenges.cloudflare.com` löst im Browser eine Prüfung und
+hängt beim Abschicken ein Feld `cf-turnstile-response` an, das im
+statischen HTML nicht steht; der Server prüft es bei Cloudflare nach.
+Fehlt es, kommt 200 mit dem Formular, ohne Fehlerwort, und die
+Sessionliste leitet den Unangemeldeten mit 302 nach `/webapp/login` um.
+Ein Werkzeug ohne Browser besteht diese Prüfung nicht, und sie zu umgehen
+ist keine Option. Der Weg daran vorbei ist die **Sitzung aus dem Browser**:
+Der Browser besteht das Captcha, das Werkzeug führt dessen Sitzung fort.
+Getragen wird sie vom Cookie `racebox`; er kommt aus der Datei `sitzung`
+oder aus `RACEBOX_SITZUNG` und wird an jede Anfrage gehängt. Ob er noch
+gilt, zeigt die Sessionliste selbst: Eine Umleitung oder das Formular
+heißt abgelaufen, und das Werkzeug rät dann zur Sitzung, nicht zum
+Passwort. Der Weg über das Formular bleibt im Code, `--zugang` erzwingt
+ihn — falls das Captcha wieder verschwindet. Wie lange eine Sitzung gilt,
+ist nicht nachgemessen; das sagt erst der erste Ablauf.
 
 **Nach erfolgreicher Anmeldung kommt eine 302-Weiterleitung** — und ihr
 wird bewusst *nicht* gefolgt. Am Windows-Rechner lief der zweite Sprung
@@ -64,6 +81,40 @@ zu unterscheiden.
 `&page=N`. Gelesen wird sie über ein Suchmuster auf
 `/webapp/session/<24 Hexzeichen>` statt über die Seitenstruktur — das
 überlebt eine Umgestaltung der Kacheln.
+
+**Eine Antwort ohne Session-Link und ohne Fahrzeugauswahl ist keine
+Sessionliste.** Ein Konto ohne Sessions hat noch die Auswahlfelder; eine
+Startseite, ein Fehlertext oder ein 200er mit null Bytes haben keines von
+beidem. Das Werkzeug bricht dann ab, statt „0 Sessions" zu melden, und
+fasst dabei zusammen, was geantwortet hat: je Antwort Statuscode,
+Rumpfgröße, ob eine Weiterleitung kam, dazu Servername und Form der
+Antwort mit Wert — und alle übrigen Kopfzeilen, Kekse voran, nur mit
+Namen. Welche Werte gezeigt werden, steht in `SICHTBARE_KOPFZEILEN`; alles
+andere bleibt draußen, damit sich die Zusammenfassung weitergeben lässt,
+ohne dass ein Sitzungsmerkmal oder eine Kennung mitgeht.
+
+**Leitet die Sessionliste um (302), wurde die Anmeldung nicht
+angenommen.** Nur ein Unangemeldeter wird von dort weggeschickt. Das
+Werkzeug meldet dann den Pfad des Ziels ohne Parameter und wertet die
+Antwort auf das Anmeldeformular aus, wieder ohne Werte: Titel, jedes
+Formular mit Methode, Pfad und Feldnamen, die Hosts eingebundener Skripte,
+dazu die Merkmale Anmeldeformular, Token-Feld, Captcha und Fehlerwörter im
+sichtbaren Text. Daran sieht man, ob ein falsches Passwort vorliegt oder
+racebox.pro das Verfahren umgebaut hat — ein CSRF-Token oder ein Captcha
+im Formular kann kein Passwort beheben. Kommt statt HTML Zeichensalat,
+steht das da: Dann ist die Antwort komprimiert angekommen und nicht
+entpackt worden.
+
+Der Anlass: Im September 2026 antwortete racebox.pro auf den Login mit
+200 und einer Seite von rund 9 kB ohne Weiterleitung, die Sessionliste
+danach mit 302 und leerem Rumpf. Ausgegeben wurde „angemeldet als“ und
+„0 Sessions“, beides geschlossen, nichts davon beobachtet — die
+Anmeldeprüfung suchte nur ein Passwortfeld, und ein leerer 302 hat keines.
+Erst auf einem Raspberry Pi, dann genauso auf dem Rechner, auf dem der
+Lauf über 259 Sessions gelungen war. Die Auswertung der Login-Seite zeigte
+das Turnstile-Skript und ein sonst unverändertes Formular; die Anmeldung
+im Browser ging. Seitdem läuft das Werkzeug über die Sitzung aus dem
+Browser, siehe oben.
 
 **Der JSON-Endpunkt** `/webapp/session/<id>/json`: Unter `session.meta`
 stehen `track`, `vehicle`, `indexInTheDay` (der Turn),
@@ -228,7 +279,7 @@ das waren die Indizes. Was sich nicht eindeutig als Zeit ausweist, wird
 python3 selbsttest.py
 ```
 
-582 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
+657 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
 — mit Anmeldung, Cookies, Blättern, Fahrzeugfilter und einem 5 MB großen
 Export. Geprüft wird beobachtbares Verhalten: welche Felder rausgehen, was
 im Cache landet, was bei Fehlern passiert.
@@ -241,7 +292,7 @@ Drei Dinge beim Ändern:
 - **Der Test biegt `BASIS` auf eine tote Adresse um.** Bleibt beim Ändern
   eine echte Adresse stehen, scheitert er, statt heimlich ins Netz zu gehen.
 - **Neue Prüfungen einmal absichtlich rot laufen lassen** — dafür gibt es
-  `python3 mutationen.py`. Es baut 122 Fehler ein, die ein Mensch wirklich
+  `python3 mutationen.py`. Es baut 161 Fehler ein, die ein Mensch wirklich
   machen könnte, und meldet jeden, der unbemerkt bleibt. Der volle Lauf
   kostet Minuten; gefiltert geht es schneller:
   `python3 mutationen.py statistik`, `-j 8` ändert die Nebenläufigkeit.
@@ -257,7 +308,12 @@ nachgemessen und nicht dokumentiert, racebox.pro schuldet uns nichts.
 Ändert sich das HTML des Fahrzeug-Auswahlfelds, findet die Zuordnung nichts
 mehr — dann rechnet das Werkzeug ohne Fahrzeugtrennung weiter und sagt das,
 statt zu raten. `--diagnose <ordner>` legt die Seiten ab, damit sich das
-Muster nachziehen lässt.
+Muster nachziehen lässt — und zu jeder benannten Antwort Statuscode und
+Kopfzeilen in `<name>.kopfzeilen`, auch bei einem 403 oder 500. Die
+Antwort auf den Login selbst liegt als `login.kopfzeilen` und `login.html`
+daneben; dort steht, ob der 302 kam, welche Kekse gesetzt wurden und wer
+überhaupt geantwortet hat. Die Kekse darin sind Sitzungsmerkmale — vor dem
+Weitergeben schwärzen.
 
 **Was RaceBox falsch misst, misst auch dieses Werkzeug falsch.** Die beiden
 Quellen stammen aus derselben Datenbank; sie gegeneinander zu halten prüft

@@ -2387,6 +2387,23 @@ TOTES_ZIEL = 'http://127.0.0.1:1/nach-dem-anmelden'
 JUNK = 5 * 1024 * 1024          # so gross, dass ein Abbruch auffaellt
 
 
+# Ein Anmeldeformular, wie es ein umgebautes racebox.pro schicken koennte:
+# mit Token-Feld, Captcha-Skript und einer Fehlermeldung. Werte darin
+# duerfen in keiner Ausgabe des Werkzeugs auftauchen.
+UMGEBAUTES_FORMULAR = (
+    '<html><head><title>Login - RaceBox</title>'
+    '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js">'
+    '</script><script src="/js/app.js"></script></head><body>'
+    '<form method="post" action="/webapp/login?next=%2Fwebapp%2Fsessions">'
+    '<input name="email" value="wer@wo.de">'
+    '<input type="password" name="password">'
+    '<input type="hidden" name="_token" value="TOKENWERT">'
+    '<div class="cf-turnstile"></div>'
+    '<button type="submit">Log in</button></form>'
+    '<p class="error">Invalid token, please try again.</p>'
+    '</body></html>')
+
+
 class Zustand:
     def __init__(self):
         self.export_felder = None
@@ -2397,6 +2414,9 @@ class Zustand:
         self.verdreht = set()     # Sessions, deren CSV absichtlich abweicht
         self.bei_null = set()     # Sessions, deren erste Runde bei Record 0 beginnt
         self.ohne_erste = set()   # Sessions, deren CSV die erste Runde nicht listet
+        self.stumm = False        # antwortet auf Login und Liste mit 200 und nichts
+        self.leer = False         # ein Konto ohne Sessions
+        self.umgebaut = False     # Login verlangt Token und Captcha
         self.kennungen = set()
         self.pfade = []
         self.geschrieben = 0
@@ -2426,7 +2446,10 @@ class Griff(BaseHTTPRequestHandler):
         self.wfile.write(roh)
 
     def _angemeldet(self):
-        return 'auth=1' in (self.headers.get('Cookie') or '')
+        # auth=1 setzt die Anmeldung ueber das Formular; racebox=... ist die
+        # Sitzung, die ein Browser mitbringt.
+        kekse = self.headers.get('Cookie') or ''
+        return 'auth=1' in kekse or 'racebox=BROWSERSITZUNG' in kekse
 
     def _formular(self):
         return ('<html><body><form method="post">'
@@ -2467,6 +2490,23 @@ class Griff(BaseHTTPRequestHandler):
         self.zustand.pfade.append(self.path)
         felder = self._felder()
         if self.path == '/webapp/login':
+            if self.zustand.umgebaut:
+                # Der Fall vom September 2026: 200 mit einer Seite, ein
+                # Keks, keine Weiterleitung -- und die Liste danach ein 302.
+                return self._antwort(UMGEBAUTES_FORMULAR,
+                                     kekse='racebox=GEHEIMSITZUNG; Path=/')
+            if self.zustand.stumm:
+                # Der Fall vom Raspberry Pi: 200, keine Weiterleitung, kein
+                # Rumpf -- und die Liste danach genauso. Dazu ein Keks und
+                # eine fremde Kopfzeile mit Werten, die nirgends in einer
+                # Ausgabe auftauchen duerfen.
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Length', '0')
+                self.send_header('Set-Cookie', 'spur=GEHEIM123; Path=/')
+                self.send_header('X-Spur', 'WERT42')
+                self.end_headers()
+                return
             richtig = (felder.get('email') == EMAIL
                        and felder.get('password') == PASSWORT)
             if not richtig:
@@ -2488,8 +2528,17 @@ class Griff(BaseHTTPRequestHandler):
         self._antwort('nichts', 404)
 
     def _sessions(self, frage):
+        if self.zustand.stumm:
+            return self._antwort('')
         if not self._angemeldet():
-            return self._antwort(self._formular())
+            if not self.zustand.umgebaut:
+                return self._antwort(self._formular())
+            self.send_response(302)
+            self.send_header('Location', '/webapp/login?redirect_to='
+                             '%2Fwebapp%2Fsessions%3Ftype%3Dtrack')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         vid = (frage.get('vid') or ['all'])[0]
         seite = int((frage.get('page') or ['1'])[0])
         def wann(eintrag):
@@ -2499,6 +2548,8 @@ class Griff(BaseHTTPRequestHandler):
         ids = [sid for sid, (_, _, fzg, _) in
                sorted(TESTSESSIONS.items(), key=wann, reverse=True)
                if vid == 'all' or FZG_KURZ.get(fzg or '') == vid]
+        if self.zustand.leer:
+            ids = []
         stueck = ids[(seite - 1) * 3:seite * 3]
         auswahl = ''.join('<option value="%s">%s</option>' % (k, v)
                           for k, v in sorted(FAHRZEUGE.items()))
@@ -2915,6 +2966,324 @@ def test_netz():
             os.environ.pop('RACEBOX_PASSWORT', None)
     finally:
         S.BASIS = echte_basis
+        server.shutdown()
+
+
+def test_stumme_antwort():
+    """Eine leere 200-Antwort ist keine leere Sessionliste.
+
+    So kam es auf einem Raspberry Pi: Login 200 ohne Weiterleitung, die
+    Sessionliste 200 mit null Bytes -- und das Werkzeug meldete "0
+    Sessions" und "angemeldet als". Beides war nicht beobachtet, sondern
+    geschlossen. Jetzt bricht es ab und legt mit --diagnose alles ab, was
+    man zum Nachsehen braucht: auch die Antwort auf den Login selbst.
+    """
+    server, basis, zustand = server_starten()
+    echte_basis, S.BASIS = S.BASIS, 'http://127.0.0.1:1/verboten'
+    diag = tempfile.mkdtemp()
+    cache = tempfile.mkdtemp()
+
+    def abzug(name):
+        with open(os.path.join(diag, name), encoding='utf-8') as f:
+            return f.read()
+
+    try:
+        zustand.stumm = True
+        rb = S.RaceBox(basis, diagnose=diag, zeitgrenze=5)
+        puffer, fehler = io.StringIO(), None
+        with contextlib.redirect_stdout(puffer):
+            try:
+                rb.anmelden(EMAIL, PASSWORT)
+            except S.AnmeldungFehlgeschlagen as e:
+                fehler = ('zugang', str(e))
+            except SystemExit as e:
+                fehler = ('abbruch', str(e))
+        pruefe(fehler is not None,
+               'eine stumme Antwort bricht ab, statt als leere Liste zu gelten')
+        pruefe(fehler and fehler[0] == 'abbruch',
+               'und behauptet nicht, das Passwort sei falsch')
+        pruefe(fehler and '0 Bytes' in fehler[1], 'die Meldung nennt, was kam')
+        pruefe(fehler and '--diagnose' in fehler[1], 'und wie man weiterkommt')
+        pruefe(fehler and '--zugang' not in fehler[1],
+               'ohne zum Neusetzen des Passworts zu raten')
+        pruefe('302' in puffer.getvalue(),
+               'die Ausgabe sagt, dass 200 ohne Weiterleitung nicht die '
+               'Antwort auf eine angenommene Anmeldung ist')
+        meldung = fehler[1] if fehler else ''
+        pruefe('login: HTTP 200, 0 Bytes Rumpf, keine Weiterleitung' in meldung,
+               'die Meldung fasst die Login-Antwort zusammen')
+        pruefe('sessions_seite1.html: HTTP 200, 0 Bytes Rumpf' in meldung,
+               'und die der Sessionliste')
+        pruefe('Server: BaseHTTP' in meldung,
+               'mit dem Namen des Servers, der geantwortet hat')
+        pruefe('Content-Length: 0' in meldung, 'und der Form der Antwort')
+        pruefe('Kekse (nur Namen): spur' in meldung,
+               'Kekse stehen mit Namen drin')
+        pruefe('GEHEIM123' not in meldung, 'aber nie mit Wert')
+        pruefe('x-spur' in meldung,
+               'fremde Kopfzeilen stehen mit Namen drin')
+        pruefe('WERT42' not in meldung, 'und ebenfalls nie mit Wert')
+        gleich(S.kopfzeilen_ohne_werte(S.http.client.HTTPMessage()),
+               ['Kekse (nur Namen): keine',
+                'weitere Kopfzeilen (nur Namen): keine'],
+               'ohne Kopfzeilen sagt die Zusammenfassung das auch')
+        pruefe('Sie sieht so aus:' in meldung and 'Formular: keines' in meldung,
+               'die stumme Antwort wird als Seite ausgewertet: kein Formular')
+
+        # -- ein umgebautes Anmeldeverfahren: 200 mit Seite, Liste 302 ----
+        zustand.stumm, zustand.umgebaut = False, True
+        rb4 = S.RaceBox(basis, zeitgrenze=5)
+        fehler = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                rb4.anmelden(EMAIL, PASSWORT)
+            except S.AnmeldungFehlgeschlagen as e:
+                fehler = str(e)
+        pruefe(fehler is not None,
+               'eine Umleitung der Sessionliste gilt als abgelehnte Anmeldung')
+        meldung = fehler or ''
+        pruefe('leitet um nach /webapp/login' in meldung,
+               'die Meldung nennt das Ziel der Umleitung')
+        pruefe('redirect_to' not in meldung, 'aber ohne seine Parameter')
+        pruefe('Titel: Login - RaceBox' in meldung,
+               'und wertet die Login-Seite aus: Titel')
+        pruefe('Formular: POST /webapp/login, Felder: email, '
+               'password (password), _token (hidden)' in meldung,
+               'Formular mit Methode, Pfad und Feldnamen')
+        pruefe('next=' not in meldung, 'der Pfad ohne Parameter')
+        pruefe('TOKENWERT' not in meldung and 'wer@wo.de' not in meldung,
+               'Feldwerte stehen nicht drin')
+        pruefe('Skripte von: challenges.cloudflare.com' in meldung,
+               'fremde Skript-Hosts stehen drin, eigene nicht')
+        # Nicht bloss das Wort suchen: "Token-Feld" steht auch im festen
+        # Text der Meldung. Die Merkmalszeile muss es sein.
+        pruefe('Merkmale: Anmeldeformular, Token-Feld, Captcha (turnstile)'
+               in meldung,
+               'Anmeldeformular, Token-Feld und Captcha sind als Merkmale '
+               'erkannt')
+        pruefe('Fehlerwoerter im Text: invalid' in meldung,
+               'und das Fehlerwort aus dem sichtbaren Text')
+        pruefe('please try again' not in meldung,
+               'der Text selbst wird nicht wiedergegeben')
+        pruefe('GEHEIMSITZUNG' not in meldung and 'racebox' in meldung,
+               'der Keks steht mit Namen drin, nie mit Wert')
+        pruefe('--zugang' in meldung, 'das falsche Passwort bleibt genannt')
+        pruefe('kein neues Passwort' in meldung,
+               'und ebenso, wann es nicht hilft')
+        pruefe('--sitzung' in meldung,
+               'und was dann hilft: die Sitzung aus dem Browser')
+
+        zeilen = S.seite_auswerten('\x1f\ufffd\ufffd\x00salat\ufffd')
+        pruefe(len(zeilen) == 1 and 'kein lesbares HTML' in zeilen[0],
+               'Zeichensalat wird als solcher benannt')
+        pruefe('nicht entpackt' in zeilen[0], 'mit dem Verdacht auf Kompression')
+        zustand.umgebaut = False
+        pruefe('angemeldet als' not in puffer.getvalue(),
+               'und nennt niemanden angemeldet')
+
+        kopf = abzug('login.kopfzeilen')
+        pruefe(kopf.startswith('HTTP 200'),
+               'die Login-Antwort liegt mit Statuscode im Diagnoseordner')
+        pruefe('Content-Length: 0' in kopf, 'samt ihren Kopfzeilen')
+        pruefe('0 Bytes Rumpf' in kopf, 'und der Laenge des Rumpfs')
+        gleich(abzug('login.html'), '', 'der Rumpf selbst liegt daneben')
+        pruefe(abzug('sessions_seite1.html.kopfzeilen').startswith('HTTP 200'),
+               'die Sessionliste bekommt ihre Kopfzeilen dazu')
+
+        # -- der gute Fall: der 302 steht im Abzug, die Liste ist erkannt --
+        zustand.stumm = False
+        rb2 = S.RaceBox(basis, diagnose=diag, zeitgrenze=5)
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            html = rb2.anmelden(EMAIL, PASSWORT)
+        kopf = abzug('login.kopfzeilen')
+        pruefe(kopf.startswith('HTTP 302') and 'Location: ' in kopf,
+               'im guten Fall steht der 302 samt Ziel im Abzug')
+        pruefe('Set-Cookie: auth=1' in kopf,
+               'und das Sitzungsmerkmal, so wie es kam')
+        pruefe(('Sessionliste: %d Bytes' % len(html)) in puffer.getvalue(),
+               'die Ausgabe nennt, wie gross die Liste war')
+        pruefe('302' not in puffer.getvalue().split('Weiterleitung nach')[0],
+               'der Hinweis auf den fehlenden 302 kommt nur ohne 302')
+
+        # -- ein Konto ohne Sessions ist trotzdem eine Sessionliste --------
+        zustand.leer = True
+        rb3 = S.RaceBox(basis, zeitgrenze=5)
+        with contextlib.redirect_stdout(io.StringIO()):
+            html = rb3.anmelden(EMAIL, PASSWORT)
+            gleich(rb3.alle_ids(), [],
+                   'ein Konto ohne Sessions liefert eine leere, echte Liste')
+        pruefe(S.ist_sessionliste(html),
+               'sie wird an der Fahrzeugauswahl erkannt')
+        pruefe(not S.ist_sessionliste(''), 'nichts ist keine Liste')
+        pruefe(not S.ist_sessionliste('<html><body>Willkommen</body></html>'),
+               'eine Seite ohne Link und ohne Auswahl auch nicht')
+        pruefe(S.ist_sessionliste('<a href="/webapp/session/%s">' % ('a' * 24)),
+               'ein Session-Link reicht')
+
+        os.environ['RACEBOX_EMAIL'] = EMAIL
+        os.environ['RACEBOX_PASSWORT'] = PASSWORT
+        puffer, meldung = io.StringIO(), None
+        with contextlib.redirect_stdout(puffer):
+            try:
+                S.main(['--basis', basis, '--cache', cache])
+            except SystemExit as e:
+                meldung = str(e)
+        pruefe(meldung is not None and 'keine' in meldung,
+               'der ganze Lauf endet mit einer Meldung')
+        pruefe(meldung and '--nur-cache' not in meldung,
+               'die nicht empfiehlt, einen Schalter wegzulassen, der nicht '
+               'gesetzt war')
+        pruefe('Sessionliste ist leer' in puffer.getvalue(),
+               'und vorher steht, was beobachtet wurde: eine leere Liste')
+    finally:
+        S.BASIS = echte_basis
+        os.environ.pop('RACEBOX_EMAIL', None)
+        os.environ.pop('RACEBOX_PASSWORT', None)
+        shutil.rmtree(diag)
+        shutil.rmtree(cache)
+        server.shutdown()
+
+
+def test_sitzung_aus_dem_browser():
+    """Das Captcha besteht der Browser; das Werkzeug fuehrt seine Sitzung fort.
+
+    Der Keks kommt aus der Umgebung oder aus der Datei `sitzung`, wird
+    verdeckt erfragt und mit 0600 abgelegt. Mit ihm faellt das
+    Anmeldeformular weg. Gilt er nicht mehr, sagt das Werkzeug, was zu
+    tun ist -- und raet nicht zum Passwort.
+    """
+    import getpass
+    server, basis, zustand = server_starten()
+    zustand.umgebaut = True
+    echte_basis, S.BASIS = S.BASIS, 'http://127.0.0.1:1/verboten'
+    ordner = tempfile.mkdtemp()
+    echte_sitzung, S.SITZUNG = S.SITZUNG, os.path.join(ordner, 'sitzung')
+    echter_ordner, S.ORDNER = S.ORDNER, ordner
+    echtes_getpass = getpass.getpass
+    cache = os.path.join(ordner, 'cache')
+    try:
+        # -- lesen: Umgebung, Datei, sonst nichts -------------------------
+        os.environ.pop('RACEBOX_SITZUNG', None)
+        gleich(S.sitzung_lesen(), None, 'ohne Datei und Umgebung keine Sitzung')
+        os.environ['RACEBOX_SITZUNG'] = 'AUSDERUMGEBUNG'
+        gleich(S.sitzung_lesen(), {'racebox': 'AUSDERUMGEBUNG'},
+               'RACEBOX_SITZUNG ist der Keks racebox')
+        os.environ.pop('RACEBOX_SITZUNG')
+        with open(S.SITZUNG, 'w', encoding='utf-8') as f:
+            f.write('# aus dem Browser\nracebox = BROWSERSITZUNG\n'
+                    '__cflb = EGAL\n\n')
+        gleich(S.sitzung_lesen(), {'racebox': 'BROWSERSITZUNG', '__cflb': 'EGAL'},
+               'die Datei liefert jeden Keks, Kommentare und Leerzeilen nicht')
+        os.remove(S.SITZUNG)
+
+        # -- fragen: verdeckt, mit Ausgang, mit 0600 -----------------------
+        gefragt = []
+        def antworten(frage=''):
+            gefragt.append(frage)
+            return ''
+        getpass.getpass = antworten
+        try:
+            still(S.sitzung_fragen)
+            pruefe(False, 'ohne Keks bricht die Sitzungsfrage ab')
+        except SystemExit:
+            pruefe(True, 'ohne Keks bricht die Sitzungsfrage ab')
+        pruefe(gefragt and 'leer = abbrechen' in gefragt[0],
+               'und die Zeile nennt diesen Ausgang')
+        getpass.getpass = lambda frage='': '  BROWSERSITZUNG \n'
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            gleich(S.sitzung_fragen(), {'racebox': 'BROWSERSITZUNG'},
+                   'die Frage liefert den Keks, ohne Raender')
+        pruefe('racebox.pro anmelden' in puffer.getvalue()
+               and 'F12' in puffer.getvalue(),
+               'davor steht, wo der Keks im Browser zu finden ist')
+        with open(S.SITZUNG, encoding='utf-8') as f:
+            gleich(f.read(), 'racebox = BROWSERSITZUNG\n',
+                   'und er liegt in der Datei')
+        if os.name == 'posix':
+            gleich(os.stat(S.SITZUNG).st_mode & 0o777, 0o600,
+                   'mit Rechten nur fuer den Besitzer')
+
+        # -- holen mit der Sitzung: kein Formular, alle Sessions -----------
+        zustand.pfade.clear()
+        rb = S.RaceBox(basis, zeitgrenze=5)
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            geholt = S.abgleichen(rb, None, None, cache, neu=True,
+                                  gleichzeitig=3,
+                                  sitzung={'racebox': 'BROWSERSITZUNG'})
+        gleich(geholt, len(TESTSESSIONS),
+               'mit der Sitzung aus dem Browser kommen alle Sessions')
+        pruefe('/webapp/login' not in zustand.pfade,
+               'ohne dass das Anmeldeformular angefasst wird')
+        pruefe('Sitzung aus dem Browser' in puffer.getvalue()
+               and 'angemeldet als' not in puffer.getvalue(),
+               'die Ausgabe sagt, worueber angemeldet wurde')
+
+        # -- eine abgelaufene Sitzung ---------------------------------------
+        for umgebaut, erwartet in ((True, 'leitet um nach /webapp/login'),
+                                   (False, 'zeigt das Anmeldeformular')):
+            zustand.umgebaut = umgebaut
+            fehler = None
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    S.RaceBox(basis, zeitgrenze=5).sitzung_uebernehmen(
+                        {'racebox': 'ABGELAUFEN'})
+                except S.SitzungAbgelaufen as e:
+                    fehler = str(e)
+            pruefe(fehler is not None and 'gilt nicht mehr' in fehler,
+                   'eine abgelaufene Sitzung wird erkannt (%s)' % erwartet)
+            pruefe(fehler and erwartet in fehler, 'mit dem Grund: ' + erwartet)
+            pruefe(fehler and '--sitzung' in fehler and '--zugang' not in fehler,
+                   'und dem Rat, die Sitzung zu erneuern, nicht das Passwort')
+        zustand.umgebaut = True
+
+        # -- der ganze Lauf: --sitzung fragt und legt ab, danach nicht mehr -
+        os.remove(S.SITZUNG)
+        os.environ.pop('RACEBOX_EMAIL', None)
+        os.environ.pop('RACEBOX_PASSWORT', None)
+        shutil.rmtree(cache, ignore_errors=True)
+        zustand.pfade.clear()
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            S.main(['--sitzung', '--basis', basis, '--cache', cache])
+        pruefe('Talkurs' in puffer.getvalue(),
+               '--sitzung fragt den Keks ab und laeuft durch bis zur Uebersicht')
+        pruefe(os.path.exists(S.SITZUNG), 'der Keks liegt danach in der Datei')
+        pruefe('/webapp/login' not in zustand.pfade,
+               'das Anmeldeformular wurde nicht angefasst')
+
+        getpass.getpass = lambda frage='': 'DARF-NICHT-GEFRAGT-WERDEN'
+        zustand.pfade.clear()
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            S.main(['--neu', '--basis', basis, '--cache', cache])
+        pruefe('Sitzung aus dem Browser' in puffer.getvalue()
+               and '/webapp/login' not in zustand.pfade,
+               'beim naechsten Lauf reicht die Datei, ohne Passwort und Formular')
+
+        # -- --zugang erzwingt den Weg ueber das Formular -----------------
+        os.environ['RACEBOX_EMAIL'] = EMAIL
+        os.environ['RACEBOX_PASSWORT'] = PASSWORT
+        zustand.umgebaut = False
+        zustand.pfade.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.main(['--neu', '--basis', basis, '--cache', cache])
+        pruefe('/webapp/login' not in zustand.pfade,
+               'mit Sitzung und Passwort zaehlt die Sitzung')
+        zustand.pfade.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.main(['--zugang', '--basis', basis, '--cache', cache])
+        pruefe('/webapp/login' in zustand.pfade,
+               '--zugang geht ueber das Formular, auch wenn eine Sitzung da ist')
+    finally:
+        getpass.getpass = echtes_getpass
+        S.BASIS, S.SITZUNG, S.ORDNER = echte_basis, echte_sitzung, echter_ordner
+        os.environ.pop('RACEBOX_SITZUNG', None)
+        os.environ.pop('RACEBOX_EMAIL', None)
+        os.environ.pop('RACEBOX_PASSWORT', None)
+        shutil.rmtree(ordner)
         server.shutdown()
 
 
