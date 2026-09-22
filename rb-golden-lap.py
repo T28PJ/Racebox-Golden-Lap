@@ -1172,7 +1172,8 @@ FIXERHOLUNG = 1.0        # Sekunden
 # aendert; sonst blieben die alten Zahlen stehen und niemand saehe es.
 # Fassung 3 behaelt die Grenzen jeder Runde in den Datenzeilen, statt nur
 # die groesste Abweichung der Session -- die Zusammenfassung braucht sie.
-RUNDEN_VERSION = 3
+# Fassung 4 behaelt ebenso, welche Messpunkte keine Messung sind.
+RUNDEN_VERSION = 4
 
 # Ab wann eine Abweichung zwischen Lap-Spalte und Rundenzeiten eine eigene
 # Meldung wert ist. Die Grenze verwirft nichts -- gezaehlt wird nur, damit
@@ -1371,7 +1372,10 @@ def runden_aus_export(pfad):
     letzter `Record` mit ihrer Nummer in der Lap-Spalte, und wie weit die
     Dauer dort von der Rundenzeit im Kopf abweicht. Das steht in
     `runden_grenzen` und geht so in die Zusammenfassung -- wer die Runde
-    aus den Rohdaten schneidet, soll sehen, ob die Grenze haelt.
+    aus den Rohdaten schneidet, soll sehen, ob die Grenze haelt. Ebenso
+    `verworfene_punkte`: die Spannen von Records, die hier nicht zaehlen,
+    weil der Empfaenger seinen Fix verloren hatte. Wer mit den Rohdaten
+    weiterrechnet, soll diese Regel nicht nachbauen muessen.
 
     Return ein dict oder None, wenn die Datei keine Datenzeilen oder keine
     Lap-Spalte hat.
@@ -1489,6 +1493,24 @@ def runden_aus_export(pfad):
     # Session auf 0,032 s stimmten. Der Fehler lag in der Probe.
     probe = max((abs(wanduhr.get(nr, 0.0) - soll) for nr, soll in kopfrunden),
                 default=0.0)
+    # Die verworfenen Punkte als zusammenhaengende Spannen. Ohne
+    # Record-Spalte liesse sich keine Spanne benennen -- dann steht dort
+    # None und nicht eine leere Liste, die "nichts verworfen" behauptete.
+    verworfen = None
+    if i_record is not None:
+        verworfen = []
+        for nr in sorted(ungueltig):
+            record = punkte[nr][5]
+            if verworfen and verworfen[-1]['bis_index'] == nr - 1:
+                verworfen[-1]['record_bis'] = record
+                verworfen[-1]['punkte'] += 1
+                verworfen[-1]['bis_index'] = nr
+            else:
+                verworfen.append({'record_von': record, 'record_bis': record,
+                                  'punkte': 1, 'grund': 'ohne_fix',
+                                  'bis_index': nr})
+        for spanne in verworfen:
+            del spanne['bis_index']
     grenzen = []
     for nr, soll in kopfrunden:
         von, bis, anzahl_punkte = bereich.get(nr, [None, None, 0])
@@ -1508,6 +1530,7 @@ def runden_aus_export(pfad):
         'meter_export': round(meter_alle),
         'runden_probe': round(probe, 3),
         'runden_grenzen': grenzen,
+        'verworfene_punkte': verworfen,
     }
 
 
@@ -2713,8 +2736,12 @@ def zusammenfassung_bauen(sessions, ordner, csv_ordner=None):
             # Die Runden kamen aus dem JSON, und das zaehlt die
             # Einfahrrunde mit: Seine Nummern sind nicht die der Lap-Spalte.
             grund = 'runden_aus_json'
+        elif k.get('runden_version', 0) < RUNDEN_VERSION:
+            # Ohne Telemetrie im Cache wurde der Export nie gelesen. Das ist
+            # kein Urteil ueber die Datei, und so heisst es auch.
+            grund = 'nicht_ausgewertet'
         elif 'runden_grenzen' not in k:
-            grund = 'ohne_lap_spalte'
+            grund = 'export_unvollstaendig'
         else:
             grund = None
             grenzen = {g['nr']: g for g in k['runden_grenzen']}
@@ -2800,6 +2827,9 @@ def zusammenfassung_bauen(sessions, ordner, csv_ordner=None):
                 'lap_spalte': grund is None,
                 'grund': grund,
                 'runden_probe': k.get('runden_probe'),
+                # Unabhaengig davon, woher die Runden kamen: Ob ein
+                # Messpunkt eine Messung ist, sagt der Export selbst.
+                'verworfene_punkte': k.get('verworfene_punkte'),
             },
             'runden': raus_runden,
         })
@@ -2863,7 +2893,9 @@ def zusammenfassung_bauen(sessions, ordner, csv_ordner=None):
         'erzeugt': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'rohdaten_ordner': pfad_relativ(csv_ordner, ordner),
         'regeln': {'sektor_schwelle': SEKTOR_SCHWELLE,
-                   'probe_grenze': PROBE_GRENZE},
+                   'probe_grenze': PROBE_GRENZE,
+                   'ortsgrenze': ORTSGRENZE,
+                   'fixerholung': FIXERHOLUNG},
         'sessions': raus_sessions,
         'auswertungen': raus_auswertungen,
     }

@@ -867,8 +867,13 @@ def test_zusammenfassung():
         export('b' * 24, KOPF_S2)
         export('y' * 24, KOPF_S2)
         # Die Lap-Spalte fasst in Runde 1 vier Sekunden, der Kopf sagt sechs.
-        export('c' * 24, export_bauen().replace('Lap 1, 4.000', 'Lap 1, 6.000'))
+        # Mit einem Ausfall davor, wie ihn ein Empfaenger ohne Fix schreibt.
+        export('c' * 24, export_bauen(ausfall=True)
+               .replace('Lap 1, 4.000', 'Lap 1, 6.000'))
         export('e' * 24, export_bauen().replace(',Lap,', ',Runde,'))
+        # Ein Eintrag aus dem alten CSV-Weg hat keine Telemetrie -- sein
+        # Export wird deshalb nie gelesen, auch wenn er daliegt.
+        export('f' * 24, export_bauen())
         still(S.runden_km_ergaenzen, sessions, csv, cache)
 
         pfad = S.zusammenfassung_schreiben(sessions, cache, csv)
@@ -877,7 +882,8 @@ def test_zusammenfassung():
             z = json.load(f)
         gleich((z['format'], z['version']),
                ('racebox-golden-lap-summary', 1), 'sie nennt Format und Version')
-        gleich(z['regeln'], {'sektor_schwelle': 0.5, 'probe_grenze': 1.0},
+        gleich(z['regeln'], {'sektor_schwelle': 0.5, 'probe_grenze': 1.0,
+                             'ortsgrenze': 100000, 'fixerholung': 1.0},
                'und die Grenzen, nach denen geurteilt wurde')
 
         je = {s['id']: s for s in z['sessions']}
@@ -952,15 +958,24 @@ def test_zusammenfassung():
                == os.path.normpath(S.export_pfad('c' * 24, csv)),
                'der Pfad zum Export ist relativ zur Zusammenfassung')
         gleich(runde('c' * 24, 1)['rohdaten'],
-               {'lap': 1, 'record_von': 4, 'record_bis': 7, 'punkte': 4,
+               {'lap': 1, 'record_von': 5, 'record_bis': 8, 'punkte': 4,
                 'abweichung': -2.0, 'auffaellig': True},
                'je Runde Records, Abweichung und ob sie auffaellt')
+        gleich(roh['verworfene_punkte'],
+               [{'record_von': 1, 'record_bis': 3, 'punkte': 3,
+                 'grund': 'ohne_fix'}],
+               'und welche Messpunkte keine Messung sind')
+        gleich(je['a' * 24]['rohdaten']['verworfene_punkte'], [],
+               'das gilt auch, wenn die Runden aus dem JSON kamen')
         gleich(je['a' * 24]['rohdaten']['grund'], 'runden_aus_json',
                'Runden aus dem JSON zaehlen anders als die Lap-Spalte')
         gleich(runde('a' * 24, 2)['rohdaten'], None,
                'und bekommen keine Grenze, die nicht stimmt')
-        gleich(je['e' * 24]['rohdaten']['grund'], 'ohne_lap_spalte',
+        gleich(je['e' * 24]['rohdaten']['grund'], 'export_unvollstaendig',
                'ein Export ohne Lap-Spalte ist benannt')
+        gleich(je['f' * 24]['rohdaten']['grund'], 'nicht_ausgewertet',
+               'ein nie gelesener Export wird nicht fuer unvollstaendig '
+               'erklaert')
         gleich(je['d' * 24]['rohdaten']['grund'], 'kein_export',
                'ein fehlender Export ebenso')
 
@@ -1997,6 +2012,8 @@ def test_runden_aus_export():
                 {'nr': 2, 'record_von': 8, 'record_bis': 11, 'punkte': 4,
                  'abweichung': 0.0}],
                'je Runde erster und letzter Record aus der Lap-Spalte')
+        gleich(w['verworfene_punkte'], [],
+               'ohne Ausfall ist nichts verworfen -- und das steht da')
 
         # Die eine Sekunde Schritttempo liegt unter der Fahrschwelle und
         # zaehlt nirgends mit -- genau wie in der Telemetrie.
@@ -2033,6 +2050,12 @@ def test_runden_aus_export():
                'davor')
         gleich(w['meter_export'], 200,
                'und die 900 km/h nach dem Ausfall steuern keinen Meter bei')
+        # Der Punkt ohne Position (Record 2) und alles eine Sekunde davor
+        # und danach: Records 1 bis 3.
+        gleich(w['verworfene_punkte'],
+               [{'record_von': 1, 'record_bis': 3, 'punkte': 3,
+                 'grund': 'ohne_fix'}],
+               'die verworfenen Punkte stehen als Spanne von Records da')
 
         # Setzt die Box mitten in einer Runde aus, zaehlt die Rundenzeit im
         # Kopf die Wanduhr durch. Die Probe muss dagegen halten und nicht
@@ -2144,15 +2167,17 @@ def test_runden_km_ergaenzen():
                'eine aeltere Version wird aus dem Export neu gerechnet, '
                'ohne etwas zu holen')
 
-        # Fassung 2 kannte die Grenzen je Runde noch nicht. Ein solcher
-        # Eintrag muss neu gelesen werden -- mit der Zahl, nicht mit der
-        # Konstante, sonst bemerkte niemand, wenn sie nicht hochgezaehlt
-        # wurde.
-        eintraege[0]['kennzahlen']['runden_version'] = 2
+        # Fassung 3 kannte die verworfenen Punkte noch nicht, Fassung 2
+        # auch die Grenzen je Runde nicht. Ein solcher Eintrag muss neu
+        # gelesen werden -- mit der Zahl, nicht mit der Konstante, sonst
+        # bemerkte niemand, wenn sie nicht hochgezaehlt wurde.
+        eintraege[0]['kennzahlen']['runden_version'] = 3
         del eintraege[0]['kennzahlen']['runden_grenzen']
+        del eintraege[0]['kennzahlen']['verworfene_punkte']
         still(S.runden_km_ergaenzen, eintraege, exporte, cache)
-        pruefe('runden_grenzen' in eintraege[0]['kennzahlen'],
-               'ein Eintrag ohne Rundengrenzen wird aus dem Export ergaenzt')
+        pruefe('runden_grenzen' in eintraege[0]['kennzahlen']
+               and 'verworfene_punkte' in eintraege[0]['kennzahlen'],
+               'ein Eintrag aus Fassung 3 wird aus dem Export ergaenzt')
 
         # Ein Export ohne Lap-Spalte wird ebenfalls vermerkt -- sonst
         # wuerde er bei jedem Lauf wieder gelesen.
