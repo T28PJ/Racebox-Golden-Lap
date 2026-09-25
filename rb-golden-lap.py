@@ -1798,16 +1798,35 @@ def ist_sessionliste(html):
 
 # --- Abgleich mit dem CSV-Export ------------------------------------------
 
+# Die Namen, unter denen ein Export einer Session liegen kann: der, unter
+# dem das Werkzeug ihn selbst ablegt, und der, unter dem der Browser ihn
+# speichert. In dieser Reihenfolge gesucht -- der eigene zuerst, denn
+# dessen Einstellungen sind bekannt.
+EXPORT_NAMEN = ('%s_bikemode.csv', '%s.csv')
+
+
 def export_pfad(sid, ordner=None):
-    """Wo der Originalexport einer Session liegt."""
-    return os.path.join(ordner or CSV_ORDNER, '%s_bikemode.csv' % sid)
+    """Wo der Originalexport einer Session liegt.
+
+    Liegt keiner da, der Pfad, unter dem das Werkzeug ihn ablegen wuerde.
+    """
+    ordner = ordner or CSV_ORDNER
+    for muster in EXPORT_NAMEN:
+        pfad = os.path.join(ordner, muster % sid)
+        if os.path.exists(pfad):
+            return pfad
+    return os.path.join(ordner, EXPORT_NAMEN[0] % sid)
 
 
 def export_ablegen(sid, text, ordner=None):
-    """Den Originalexport ablegen. Return den Pfad."""
+    """Den Originalexport ablegen. Return den Pfad.
+
+    Immer unter dem eigenen Namen, nie ueber einen von Hand abgelegten:
+    Der gehoert dem, der ihn dort hingelegt hat.
+    """
     ordner = ordner or CSV_ORDNER
     ordner_anlegen(ordner)
-    pfad = export_pfad(sid, ordner)
+    pfad = os.path.join(ordner, EXPORT_NAMEN[0] % sid)
     vorlaeufig = pfad + '.neu'
     with open(vorlaeufig, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
@@ -1815,9 +1834,9 @@ def export_ablegen(sid, text, ordner=None):
     return pfad
 
 
-# Der Name, unter dem `export_ablegen` einen Export ablegt. Die Kennung der
-# Session steht nur dort -- im Export selbst kommt sie nicht vor.
-EXPORT_NAME = re.compile(r'^([0-9a-f]{24})_bikemode\.csv$')
+# Die Namen aus `EXPORT_NAMEN` als Muster. Die Kennung der Session steht
+# nur dort -- im Export selbst kommt sie nicht vor.
+EXPORT_NAME = re.compile(r'^([0-9a-f]{24})(?:_bikemode)?\.csv$')
 
 
 def export_kopf(pfad):
@@ -1879,19 +1898,26 @@ def exporte_uebernehmen(cache_ordner=None, csv_ordner=None):
     if not os.path.isdir(ordner):
         return 0, []
     vorhanden = cache_lesen(cache_ordner)
-    offen, fremd = [], []
+    offen, fremd, gesehen = [], [], set()
     for name in sorted(os.listdir(ordner)):
         if not name.lower().endswith('.csv'):
             continue
         treffer = EXPORT_NAME.match(name)
         if not treffer:
-            fremd.append((name, 'heisst nicht <Kennung>_bikemode.csv'))
+            fremd.append((name, 'heisst weder <Kennung>.csv noch '
+                                '<Kennung>_bikemode.csv'))
             continue
-        alt = vorhanden.get(treffer.group(1))
+        sid = treffer.group(1)
+        # Liegen beide Namen da, gilt einer -- derselbe, den auch die
+        # Zusammenfassung nennt.
+        if sid in gesehen:
+            continue
+        gesehen.add(sid)
+        alt = vorhanden.get(sid)
         if alt is None or (alt.get('quelle') == 'export'
                            and (alt.get('export') or {})
                            .get('runden_version', 0) < RUNDEN_VERSION):
-            offen.append((treffer.group(1), name))
+            offen.append((sid, os.path.basename(export_pfad(sid, ordner))))
 
     uebernommen = 0
     if offen:

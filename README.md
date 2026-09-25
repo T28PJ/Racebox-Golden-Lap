@@ -86,10 +86,12 @@ Export ohne Eintrag im Cache wird dann einmal gelesen und als Session
 übernommen — mit Runden, Sektoren, Strecke und Tag, samt
 Zusammenfassung. Zwei Dinge stehen nur bei racebox.pro und fehlen
 deshalb: das Fahrzeug und die Ortszeit. Die Startzeit steht in UTC da,
-und die Statistik kennt keine Kilometer. Erkannt wird eine Session nur an ihrem
-Dateinamen `<Kennung>_bikemode.csv` — die Kennung steht in der Adresse
-ihrer Seite, `/webapp/session/<Kennung>`. Andere CSV-Dateien nennt das
-Werkzeug und lässt sie liegen. Kommt später doch eine Sitzung dazu,
+und die Statistik kennt keine Kilometer. Erkannt wird eine Session nur
+an ihrem Dateinamen, `<Kennung>.csv` wie aus dem Browser oder
+`<Kennung>_bikemode.csv` wie vom Werkzeug abgelegt — die Kennung steht
+in der Adresse ihrer Seite, `/webapp/session/<Kennung>`. Andere
+CSV-Dateien nennt das Werkzeug und lässt sie liegen, und einen von Hand
+abgelegten Export überschreibt es nie. Kommt später doch eine Sitzung dazu,
 ersetzt das nächste Holen diese Einträge durch vollständige.
 
 **Wieder herauskommen:** Jede Eingabezeile nennt ihren Ausgang. `q` oder

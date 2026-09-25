@@ -2024,6 +2024,11 @@ def test_nur_aus_exporten():
         ablegen('d' * 24 + '_bikemode.csv', export_bauen())
         S.cache_schreiben(dict(sessions_bauen()[0], id='d' * 24,
                                fahrzeug='Aus dem Netz'), cache)
+        # So speichert der Browser einen Export: nur die Kennung.
+        ablegen('e' * 24 + '.csv', export_bauen())
+        # Liegen beide Namen da, gilt der eigene.
+        ablegen('f' * 24 + '_bikemode.csv', export_bauen())
+        ablegen('f' * 24 + '.csv', 'hallo\n')
 
         text = lauf()
         pruefe('TALKURS' in text,
@@ -2054,6 +2059,21 @@ def test_nur_aus_exporten():
                'uebernommen')
         pruefe('Session vom Sonntag.csv' in text,
                'ebenso eine, deren Name keine Kennung traegt')
+        e = je.get('e' * 24) or {}
+        gleich((e.get('quelle'), e.get('rohdaten', {}).get('datei'),
+                e.get('rohdaten', {}).get('grund')),
+               ('export', '../csv-exports/' + 'e' * 24 + '.csv', None),
+               'ein Export, der nur <Kennung>.csv heisst, wird uebernommen, '
+               'und die Zusammenfassung zeigt auf ihn')
+        pruefe('f' * 24 in je and 'f' * 24 + '.csv' not in text,
+               'liegen beide Namen da, gilt <Kennung>_bikemode.csv')
+        pfad = S.export_ablegen('e' * 24, 'neu geholt', csv)
+        with open(os.path.join(csv, 'e' * 24 + '.csv'),
+                  encoding='utf-8') as f:
+            pruefe(pfad.endswith('_bikemode.csv') and 'neu geholt'
+                   not in f.read(),
+                   'ein neu geholter Export ueberschreibt keinen von Hand '
+                   'abgelegten')
         pruefe('ohne Rundenzeilen im Export' not in text,
                'die Uebersicht haelt Sessions aus dem Export nicht fuer '
                'solche aus dem JSON')

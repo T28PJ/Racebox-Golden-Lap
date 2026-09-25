@@ -482,7 +482,11 @@ Rundennummer darin.
 
 Je Session eine Datei `<id>_bikemode.csv`, so wie racebox.pro sie im
 Browser exportiert: Zeitformat UTC, Geschwindigkeit in km/h, Höhe in
-Metern, Motorradmodus an, Zeilenende LF, UTF-8. Die Datei hat zwei Teile.
+Metern, Motorradmodus an, Zeilenende LF, UTF-8. Von Hand abgelegt kann
+sie auch `<id>.csv` heißen — welche Datei gilt, steht in
+`rohdaten.datei`. Mit welchen Einstellungen ein solcher Export entstand,
+weiß Golden Lap nicht; die Spalten findet es über ihre Namen, und fehlt
+eine, heißt der Grund `export_unvollstaendig`. Die Datei hat zwei Teile.
 
 **Der Kopfblock**, Zeile für Zeile `Schlüssel,Wert`:
 
@@ -559,9 +563,12 @@ auch mit `--nur-cache`, dafür ist es da. Wer keine Sitzung aus dem
 Browser hat, kommt so trotzdem zu Golden Lap und Zusammenfassung.
 
 - **Die Kennung steht nur im Dateinamen.** Im Export selbst kommt sie
-  nicht vor. Übernommen wird deshalb nur, was `<24 Hexzeichen>_bikemode.csv`
-  heißt und mit einem RaceBox-Kopf beginnt; jede andere CSV-Datei wird mit
-  Grund genannt und liegen gelassen.
+  nicht vor. Übernommen wird deshalb nur, was `<24 Hexzeichen>.csv` oder
+  `<24 Hexzeichen>_bikemode.csv` heißt und mit einem RaceBox-Kopf beginnt;
+  jede andere CSV-Datei wird mit Grund genannt und liegen gelassen. Liegen
+  beide Namen da, gilt der zweite, der des Werkzeugs. Beim Holen legt das
+  Werkzeug immer unter dem zweiten ab und überschreibt so nie einen Export,
+  den jemand von Hand dort hingelegt hat.
 - **Der Eintrag ist einer des alten CSV-Wegs ohne Sessionseite**:
   Runden und Sektoren aus dem Kopfblock, Tag und Startzeit in UTC, kein
   Fahrzeug, Fassung 1. Das nächste Holen ersetzt ihn deshalb durch den
@@ -580,7 +587,7 @@ Browser hat, kommt so trotzdem zu Golden Lap und Zusammenfassung.
 python3 selbsttest.py
 ```
 
-724 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
+727 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
 — mit Anmeldung, Cookies, Blättern, Fahrzeugfilter und einem 5 MB großen
 Export. Geprüft wird beobachtbares Verhalten: welche Felder rausgehen, was
 im Cache landet, was bei Fehlern passiert.
@@ -593,7 +600,7 @@ Drei Dinge beim Ändern:
 - **Der Test biegt `BASIS` auf eine tote Adresse um.** Bleibt beim Ändern
   eine echte Adresse stehen, scheitert er, statt heimlich ins Netz zu gehen.
 - **Neue Prüfungen einmal absichtlich rot laufen lassen** — dafür gibt es
-  `python3 mutationen.py`. Es baut 195 Fehler ein, die ein Mensch wirklich
+  `python3 mutationen.py`. Es baut 199 Fehler ein, die ein Mensch wirklich
   machen könnte, und meldet jeden, der unbemerkt bleibt. Der volle Lauf
   kostet Minuten; gefiltert geht es schneller:
   `python3 mutationen.py statistik`, `-j 8` ändert die Nebenläufigkeit.
