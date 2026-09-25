@@ -344,8 +344,11 @@ Was racebox.pro über sie sagt: `id` (24 Hexzeichen), `strecke`,
 `konfiguration`, `konfig_id`, `fahrzeug`, `fahrzeug_id`, `datum`,
 `startzeit`, `datum_utc`, `turn` (der wievielte Turn des Tages),
 `quelle` (woher Golden Lap die Runden hat: `json+csv` aus dem Export,
-`json` aus der JSON-Antwort, `csv` über den alten Weg) und
-`cache_version`. Dazu das Urteil:
+`json` aus der JSON-Antwort, `csv` über den alten Weg, `export` allein
+aus dem abgelegten Export, ohne racebox.pro) und `cache_version`. Bei
+`export` fehlt, was nur racebox.pro weiß: `fahrzeug` ist `ohne Fahrzeug`,
+`fahrzeug_id` und `konfig_id` sind `null`, `datum` ist der Tag in UTC und
+`startzeit` trägt den Zusatz ` UTC`. Dazu das Urteil:
 
 | `status` | heißt |
 |---|---|
@@ -436,7 +439,8 @@ Eine Runde ohne einen einzigen Punkt hat `record_von` und `record_bis`
 | `grund` | warum nicht, sonst `null` |
 
 Maßgeblich für einen Leser ist `nummer`; `position` weicht nur bei
-Sessions ab, die über den alten CSV-Weg kamen.
+Sessions ab, die über den alten CSV-Weg kamen oder allein aus dem Export
+(`quelle` `csv` oder `export`).
 
 | `grund` | heißt |
 |---|---|
@@ -547,13 +551,36 @@ Zwei Dinge wusste der Cache vorher nicht, und beide ohne neuen Download:
   neuer Download für Sessions, die meist gar nicht betroffen sind, wäre
   teurer als die ehrliche Antwort `unbekannt`.
 
+## Wenn nur die Exporte da sind
+
+Jeder Lauf schaut vor allem anderen in `csv-exports`: Ein Export, zu dem
+der Cache keinen Eintrag hat, wird gelesen und als Session abgelegt —
+auch mit `--nur-cache`, dafür ist es da. Wer keine Sitzung aus dem
+Browser hat, kommt so trotzdem zu Golden Lap und Zusammenfassung.
+
+- **Die Kennung steht nur im Dateinamen.** Im Export selbst kommt sie
+  nicht vor. Übernommen wird deshalb nur, was `<24 Hexzeichen>_bikemode.csv`
+  heißt und mit einem RaceBox-Kopf beginnt; jede andere CSV-Datei wird mit
+  Grund genannt und liegen gelassen.
+- **Der Eintrag ist einer des alten CSV-Wegs ohne Sessionseite**:
+  Runden und Sektoren aus dem Kopfblock, Tag und Startzeit in UTC, kein
+  Fahrzeug, Fassung 1. Das nächste Holen ersetzt ihn deshalb durch den
+  vollständigen; ein Eintrag aus dem Netz wird umgekehrt nie durch einen
+  Export ersetzt.
+- **Was `runden_aus_export` über die Datei sagt, steht unter `export`,
+  nicht unter `kennzahlen`.** Die Statistik hält die Kilometer des Exports
+  gegen die der Telemetrie; stünden beide aus derselben Datei da, bestätigte
+  der Export sich selbst. Die Session zählt in der Statistik deshalb als
+  eine ohne Telemetrie. Neu gelesen wird der Export nur, wenn
+  `RUNDEN_VERSION` steigt.
+
 ## Testen
 
 ```sh
 python3 selbsttest.py
 ```
 
-710 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
+724 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
 — mit Anmeldung, Cookies, Blättern, Fahrzeugfilter und einem 5 MB großen
 Export. Geprüft wird beobachtbares Verhalten: welche Felder rausgehen, was
 im Cache landet, was bei Fehlern passiert.
@@ -566,7 +593,7 @@ Drei Dinge beim Ändern:
 - **Der Test biegt `BASIS` auf eine tote Adresse um.** Bleibt beim Ändern
   eine echte Adresse stehen, scheitert er, statt heimlich ins Netz zu gehen.
 - **Neue Prüfungen einmal absichtlich rot laufen lassen** — dafür gibt es
-  `python3 mutationen.py`. Es baut 184 Fehler ein, die ein Mensch wirklich
+  `python3 mutationen.py`. Es baut 195 Fehler ein, die ein Mensch wirklich
   machen könnte, und meldet jeden, der unbemerkt bleibt. Der volle Lauf
   kostet Minuten; gefiltert geht es schneller:
   `python3 mutationen.py statistik`, `-j 8` ändert die Nebenläufigkeit.

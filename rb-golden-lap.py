@@ -1815,6 +1815,117 @@ def export_ablegen(sid, text, ordner=None):
     return pfad
 
 
+# Der Name, unter dem `export_ablegen` einen Export ablegt. Die Kennung der
+# Session steht nur dort -- im Export selbst kommt sie nicht vor.
+EXPORT_NAME = re.compile(r'^([0-9a-f]{24})_bikemode\.csv$')
+
+
+def export_kopf(pfad):
+    """Der Kopfblock eines abgelegten Exports, ohne die Datenzeilen."""
+    zeilen = []
+    with open(pfad, encoding='utf-8', errors='replace') as f:
+        for zeile in f:
+            if zeile.startswith('Record,'):
+                break
+            zeilen.append(zeile)
+    return ''.join(zeilen)
+
+
+def session_aus_export(sid, pfad):
+    """Ein Cache-Eintrag allein aus einem abgelegten Export. None, wenn die
+    Datei kein Export von racebox.pro ist.
+
+    Der Kopfblock traegt Strecke, Konfiguration, Tag und alle Runden mit
+    ihren Sektoren, die Datenzeilen die Lap-Spalte -- genug fuer die
+    Golden Lap und die Zusammenfassung. Was fehlt, weiss nur racebox.pro:
+    das Fahrzeug, die Ortszeit und die Telemetrie. Der Eintrag ist deshalb
+    einer des alten CSV-Wegs ohne Sessionseite, mit Tag und Startzeit in
+    UTC, und traegt dessen Fassung. Beim naechsten Holen wird er durch den
+    vollstaendigen ersetzt.
+
+    Was `runden_aus_export` ueber die Datei sagt, steht unter `export` und
+    nicht unter `kennzahlen`: Dort erwartet die Statistik die Telemetrie,
+    und gegen die haelt sie den Export. Ein Export, der gegen sich selbst
+    gehalten wird, bestaetigte sich nur.
+    """
+    kopf = export_kopf(pfad)
+    if 'RaceBox' not in kopf[:200]:
+        return None
+    eintrag = session_bauen(sid, kopf, None, None)
+    eintrag['quelle'] = 'export'
+    # Auch ein "da steht keine Lap-Spalte drin" wird vermerkt: Sonst hiesse
+    # es in der Zusammenfassung, der Export sei nie gelesen worden.
+    eintrag['export'] = (runden_aus_export(pfad)
+                         or {'runden_version': RUNDEN_VERSION})
+    return eintrag
+
+
+def exporte_uebernehmen(cache_ordner=None, csv_ordner=None):
+    """Abgelegte Exporte ohne Eintrag im Cache als Sessions uebernehmen.
+
+    Fuer den, der racebox.pro nicht erreicht -- keine Sitzung aus dem
+    Browser, oder die Exporte von einem anderen Rechner mitgebracht --,
+    die Originalexporte aber hat. Ohne das bliebe der Cache leer, obwohl
+    jede Runde auf der Platte liegt.
+
+    Ein Eintrag aus dem Netz wird nie ueberschrieben: Er weiss mehr als
+    der Export. Neu gelesen wird ein uebernommener Eintrag nur, wenn sich
+    `RUNDEN_VERSION` geaendert hat.
+
+    Return (uebernommen, fremd). `fremd` sind die CSV-Dateien, aus denen
+    sich keine Session machen laesst, mit Grund.
+    """
+    ordner = csv_ordner or CSV_ORDNER
+    if not os.path.isdir(ordner):
+        return 0, []
+    vorhanden = cache_lesen(cache_ordner)
+    offen, fremd = [], []
+    for name in sorted(os.listdir(ordner)):
+        if not name.lower().endswith('.csv'):
+            continue
+        treffer = EXPORT_NAME.match(name)
+        if not treffer:
+            fremd.append((name, 'heisst nicht <Kennung>_bikemode.csv'))
+            continue
+        alt = vorhanden.get(treffer.group(1))
+        if alt is None or (alt.get('quelle') == 'export'
+                           and (alt.get('export') or {})
+                           .get('runden_version', 0) < RUNDEN_VERSION):
+            offen.append((treffer.group(1), name))
+
+    uebernommen = 0
+    if offen:
+        melde('Abgelegte Exporte ohne Eintrag im Cache lesen (%s) ...'
+              % anzahl(len(offen), 'Datei', 'Dateien'))
+    for sid, name in offen:
+        try:
+            eintrag = session_aus_export(sid, os.path.join(ordner, name))
+        except (OSError, ValueError) as e:
+            fremd.append((name, 'unlesbar: %s' % e))
+            continue
+        if eintrag is None:
+            fremd.append((name, 'kein Export von racebox.pro'))
+            continue
+        cache_schreiben(eintrag, cache_ordner)
+        uebernommen += 1
+    if uebernommen:
+        melde('  %d uebernommen -- ohne Fahrzeug und mit der Startzeit in '
+              'UTC: Beides steht' % uebernommen)
+        melde('  nicht im Export, sondern nur bei racebox.pro. Das naechste '
+              'Holen ersetzt sie.')
+    if fremd:
+        melde('In %s liegen CSV-Dateien, aus denen keine Session wird:'
+              % ordner)
+        for name, grund in fremd:
+            melde('    %s  %s' % (name, grund))
+        melde('  Die Kennung einer Session steht in der Adresse ihrer Seite '
+              'auf racebox.pro,')
+        melde('  /webapp/session/<Kennung>. Nur ueber den Dateinamen findet '
+              'das Werkzeug sie.')
+        melde()
+    return uebernommen, fremd
+
+
 def csv_abgleich(sid, daten, csvtext):
     """Die Sektoren aus dem JSON gegen die aus dem CSV-Export halten.
 
@@ -2726,6 +2837,10 @@ def zusammenfassung_bauen(sessions, ordner, csv_ordner=None):
         eintrag = strecke_von.get(sid)
         layout = eintrag['layout'] if eintrag else None
         k = s.get('kennzahlen') or {}
+        if s.get('quelle') == 'export':
+            # Ohne Telemetrie, aber mit gelesenem Export -- siehe
+            # `session_aus_export`.
+            k = s.get('export') or {}
 
         pfad = export_pfad(sid, csv_ordner)
         vorhanden = os.path.exists(pfad)
@@ -3040,7 +3155,7 @@ def fussnoten(strecken, ausgeblendet, ordner, versteckt=0, doppelte=()):
         melde('       zeigt, welche -- und was ohne sie uebrig bliebe.')
         melde()
     nur_json = sorted({s['id'] for e in strecken for z in e['fahrzeuge']
-                       for s in z['sessions'] if s.get('quelle') != 'json+csv'})
+                       for s in z['sessions'] if s.get('quelle') == 'json'})
     if nur_json:
         melde('  %d Session(s) ohne Rundenzeilen im Export -- dort gelten '
               'die Runden aus dem JSON,' % len(nur_json))
@@ -4254,6 +4369,10 @@ def main(argv=None):
     a = argumente(argv)
     cache_ordner = a.cache or CACHE
 
+    # Vor der Frage nach dem Holen: Wer nur Exporte hat, soll gefragt
+    # werden, ob er holen will -- und nicht ungefragt zur Anmeldung.
+    exporte_uebernehmen(cache_ordner)
+
     holen = not a.nur_cache
     if holen and not a.neu and not a.zugang and not a.sitzung:
         holen = soll_holen(cache_ordner)
@@ -4277,8 +4396,10 @@ def main(argv=None):
     if not sessions:
         if a.nur_cache:
             raise SystemExit(
-                'Keine Sessions im Cache (%s). Ohne --nur-cache starten, '
-                'dann werden sie geholt.' % cache_ordner)
+                'Keine Sessions im Cache (%s) und keine verwertbaren '
+                'Exporte in %s. Ohne --nur-cache starten, dann werden sie '
+                'geholt.'
+                % (cache_ordner, CSV_ORDNER))
         raise SystemExit(
             'Keine Sessions im Cache (%s): racebox.pro hat fuer dieses '
             'Konto keine genannt.' % cache_ordner)

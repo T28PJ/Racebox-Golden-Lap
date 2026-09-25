@@ -79,6 +79,19 @@ das Werkzeug vorher an. Bei jedem weiteren Start fragt es zuerst, ob
 überhaupt geholt werden soll; wer nur nachsehen will, antwortet `n` und
 rechnet aus dem Cache.
 
+**Nur mit den Exporten geht es auch.** Wer keine Sitzung hat oder die
+Originalexporte von einem anderen Rechner mitbringt, legt sie nach
+`csv-exports` neben das Skript und startet mit `--nur-cache`. Jeder
+Export ohne Eintrag im Cache wird dann einmal gelesen und als Session
+übernommen — mit Runden, Sektoren, Strecke und Tag, samt
+Zusammenfassung. Zwei Dinge stehen nur bei racebox.pro und fehlen
+deshalb: das Fahrzeug und die Ortszeit. Die Startzeit steht in UTC da,
+und die Statistik kennt keine Kilometer. Erkannt wird eine Session nur an ihrem
+Dateinamen `<Kennung>_bikemode.csv` — die Kennung steht in der Adresse
+ihrer Seite, `/webapp/session/<Kennung>`. Andere CSV-Dateien nennt das
+Werkzeug und lässt sie liegen. Kommt später doch eine Sitzung dazu,
+ersetzt das nächste Holen diese Einträge durch vollständige.
+
 **Wieder herauskommen:** Jede Eingabezeile nennt ihren Ausgang. `q` oder
 `ende` beendet den Lauf, in der Fahrzeugauswahl führt es zurück zur
 Übersicht. Strg+C funktioniert auch, ist aber die Notbremse und nicht die
@@ -92,7 +105,7 @@ ein zulässiges Passwort; der Ausgang ist die leere Eingabe.
 | *(ohne)* | Übersicht, dann Strecke wählen |
 | `--strecke Talkurs` | direkt diese Strecke, ohne Menü (Nummer oder Namensteil) |
 | `--statistik` | alles Gefahrene: Kilometer, Stunden, Geschwindigkeiten |
-| `--nur-cache` | rechnen ohne Netz |
+| `--nur-cache` | rechnen ohne Netz — auch allein aus den Exporten in `csv-exports` |
 | `--neu` | alle Sessions noch einmal holen |
 | `--alle` | auch ausgeblendete Strecken und Fahrzeuge zeigen |
 | `--ausblenden "Kartbahn*"` | diese Strecke künftig weglassen |

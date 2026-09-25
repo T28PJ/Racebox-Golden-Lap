@@ -1988,6 +1988,102 @@ def export_bauen(runde2_kopfzeit='4.000', ausfall=False, luecke=False):
     return kopf + '\n'.join(zeilen) + '\n'
 
 
+def test_nur_aus_exporten():
+    """Wer nur die Exporte hat, bekommt trotzdem die Zusammenfassung.
+
+    Ohne Sitzung kein racebox.pro, ohne racebox.pro kein Cache -- die
+    Runden liegen aber vollstaendig in den abgelegten Exporten. Ein Lauf
+    mit --nur-cache uebernimmt sie, statt mit "keine Sessions" zu enden.
+    """
+    basis = tempfile.mkdtemp()
+    cache = os.path.join(basis, 'cache')
+    csv = os.path.join(basis, 'csv-exports')
+    os.makedirs(csv)
+    echte_exporte, S.CSV_ORDNER = S.CSV_ORDNER, csv
+    echter_ordner, S.ORDNER = S.ORDNER, basis
+
+    def ablegen(name, text):
+        with open(os.path.join(csv, name), 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def lauf(*schalter):
+        puffer = io.StringIO()
+        with contextlib.redirect_stdout(puffer):
+            S.main(['--nur-cache', '--cache', cache, '--alle'] + list(schalter))
+        return puffer.getvalue()
+
+    try:
+        ablegen('a' * 24 + '_bikemode.csv', export_bauen().replace(
+            'Format,RaceBox CSV\n', 'Format,RaceBox CSV\n'
+            'Date UTC,2026-08-25T13:00:00+00:00\nSession Index,2\n'))
+        # Nur der Kopf, keine Datenzeilen.
+        ablegen('b' * 24 + '_bikemode.csv', KOPF_S2)
+        ablegen('c' * 24 + '_bikemode.csv', 'hallo\n')
+        ablegen('Session vom Sonntag.csv', KOPF_S1)
+        # Eine Session aus dem Netz weiss mehr als ihr Export.
+        ablegen('d' * 24 + '_bikemode.csv', export_bauen())
+        S.cache_schreiben(dict(sessions_bauen()[0], id='d' * 24,
+                               fahrzeug='Aus dem Netz'), cache)
+
+        text = lauf()
+        pruefe('TALKURS' in text,
+               '--nur-cache rechnet aus den Exporten, statt abzubrechen')
+        with open(os.path.join(cache, S.ZUSAMMENFASSUNG),
+                  encoding='utf-8') as f:
+            je = {s['id']: s for s in json.load(f)['sessions']}
+        a = je.get('a' * 24) or {}
+        gleich((a.get('quelle'), a.get('status')), ('export', 'gewertet'),
+               'die Session aus dem Export steht gewertet darin, mit Quelle')
+        gleich((a.get('datum'), a.get('startzeit'), a.get('turn'),
+                a.get('fahrzeug')),
+               ('2026-08-25', '13:00 UTC', 2, 'ohne Fahrzeug'),
+               'Tag und Startzeit in UTC, Turn aus dem Kopf, kein Fahrzeug')
+        gleich(a.get('rohdaten', {}).get('grund'), None,
+               'ihr Export ist gelesen und traegt die Lap-Spalte')
+        gleich([r['rohdaten'] and r['rohdaten']['record_von']
+                for r in a.get('runden', [])], [4, 8],
+               'jede Runde zeigt, wo sie im Export liegt')
+        gleich(je.get('b' * 24, {}).get('rohdaten', {}).get('grund'),
+               'export_unvollstaendig',
+               'ein Export ohne Datenzeilen heisst unvollstaendig, nicht '
+               'ungelesen')
+        gleich(S.cache_lesen(cache)['d' * 24]['fahrzeug'], 'Aus dem Netz',
+               'ein Eintrag aus dem Netz wird nicht durch den Export ersetzt')
+        pruefe('c' * 24 not in je and 'kein Export von racebox.pro' in text,
+               'eine Datei, die kein Export ist, wird benannt statt '
+               'uebernommen')
+        pruefe('Session vom Sonntag.csv' in text,
+               'ebenso eine, deren Name keine Kennung traegt')
+        pruefe('ohne Rundenzeilen im Export' not in text,
+               'die Uebersicht haelt Sessions aus dem Export nicht fuer '
+               'solche aus dem JSON')
+
+        eintrag = S.cache_lesen(cache)['a' * 24]
+        S.cache_schreiben(dict(eintrag, merker=1), cache)
+        lauf()
+        gleich(S.cache_lesen(cache)['a' * 24].get('merker'), 1,
+               'der zweite Lauf liest einen uebernommenen Export nicht neu')
+        eintrag['export'] = {'runden_version': S.RUNDEN_VERSION - 1}
+        S.cache_schreiben(eintrag, cache)
+        lauf()
+        pruefe('runden_grenzen' in S.cache_lesen(cache)['a' * 24]['export'],
+               'nach einer neuen RUNDEN_VERSION wird er neu gelesen')
+
+        shutil.rmtree(cache)
+        shutil.rmtree(csv)
+        meldung = None
+        try:
+            lauf()
+        except SystemExit as e:
+            meldung = str(e)
+        pruefe(meldung is not None and csv in meldung,
+               'ohne Cache und ohne Exporte nennt die Meldung beide Orte')
+    finally:
+        S.CSV_ORDNER = echte_exporte
+        S.ORDNER = echter_ordner
+        shutil.rmtree(basis)
+
+
 def test_runden_aus_export():
     """Die Lap-Spalte des Originalexports teilt die Kilometer auf."""
     ordner = tempfile.mkdtemp()
@@ -3383,11 +3479,16 @@ def test_stumme_antwort():
         os.environ['RACEBOX_EMAIL'] = EMAIL
         os.environ['RACEBOX_PASSWORT'] = PASSWORT
         puffer, meldung = io.StringIO(), None
+        # Ein Konto ohne Sessions und ohne abgelegte Exporte -- die der
+        # uebrigen Tests wuerden sonst als Sessions uebernommen.
+        echte_exporte, S.CSV_ORDNER = S.CSV_ORDNER, os.path.join(cache, 'x')
         with contextlib.redirect_stdout(puffer):
             try:
                 S.main(['--basis', basis, '--cache', cache])
             except SystemExit as e:
                 meldung = str(e)
+            finally:
+                S.CSV_ORDNER = echte_exporte
         pruefe(meldung is not None and 'keine' in meldung,
                'der ganze Lauf endet mit einer Meldung')
         pruefe(meldung and '--nur-cache' not in meldung,
@@ -3717,9 +3818,16 @@ def test_splitansicht_ueber_die_bedienung():
 
 
 def main():
-    for name, f in sorted(globals().items()):
-        if name.startswith('test_') and callable(f):
-            f()
+    # Die Exporte landen sonst neben dem Skript -- und ein Lauf von `main`
+    # uebernaehme sie von dort als Sessions, auch aus fremden Tests.
+    echte_exporte, S.CSV_ORDNER = S.CSV_ORDNER, tempfile.mkdtemp()
+    try:
+        for name, f in sorted(globals().items()):
+            if name.startswith('test_') and callable(f):
+                f()
+    finally:
+        shutil.rmtree(S.CSV_ORDNER)
+        S.CSV_ORDNER = echte_exporte
     print()
     if ROT:
         print('%d gruen, %d ROT' % (GRUEN, len(ROT)))
