@@ -281,6 +281,7 @@ C:\Rennstrecke\Golden Lap\
     sitzung                                <- der Cookie aus dem Browser
     cache\
         a1b2c3d4e5f60718293a4b5c.json      <- eine Datei je Session
+        golden-lap-summary.json            <- die Zusammenfassung
     csv-exports\                           <- die Originalexporte
         a1b2c3d4e5f60718293a4b5c_bikemode.csv
 ```
@@ -288,6 +289,12 @@ C:\Rennstrecke\Golden Lap\
 Die Übersicht nennt den Ordner in ihrer letzten Zeile.
 `RB_GOLDEN_LAP_DIR` verlegt beides, `--cache` nur den Cache. Löschen ist
 gefahrlos — beim nächsten Start ist alles wieder da.
+
+**`golden-lap-summary.json`** schreibt jeder Lauf neu: welche Runden
+zählen und welche nicht, samt Grund, und wo jede Runde im Originalexport
+liegt. Sie ist für andere Werkzeuge gedacht, die mit den Rohdaten
+weiterrechnen. Ausblendliste und Fahrzeugfilter gelten dort nicht.
+Beschrieben ist sie in [`TECHNIK.md`](TECHNIK.md#die-zusammenfassung).
 
 **Das Passwort steht im Klartext in `zugang`, der Cookie in `sitzung`.**
 Beide Dateien werden mit den Rechten `0600` angelegt — unter Linux und

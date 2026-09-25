@@ -1170,7 +1170,10 @@ FIXERHOLUNG = 1.0        # Sekunden
 # ihrer Rechnung auch keinen Download nach sich ziehen -- ein erneutes Lesen
 # der Dateien genuegt. Hochzaehlen, wenn sich an `runden_aus_export` etwas
 # aendert; sonst blieben die alten Zahlen stehen und niemand saehe es.
-RUNDEN_VERSION = 2
+# Fassung 3 behaelt die Grenzen jeder Runde in den Datenzeilen, statt nur
+# die groesste Abweichung der Session -- die Zusammenfassung braucht sie.
+# Fassung 4 behaelt ebenso, welche Messpunkte keine Messung sind.
+RUNDEN_VERSION = 4
 
 # Ab wann eine Abweichung zwischen Lap-Spalte und Rundenzeiten eine eigene
 # Meldung wert ist. Die Grenze verwirft nichts -- gezaehlt wird nur, damit
@@ -1365,12 +1368,23 @@ def runden_aus_export(pfad):
     Geschwindigkeit mal Zeit, gefahren ab `FAHRSCHWELLE`. Sonst waeren die
     beiden Zahlen nicht vergleichbar, und die Gegenprobe unten waere keine.
 
+    Nebenbei faellt ab, wo jede Runde in den Datenzeilen liegt: erster und
+    letzter `Record` mit ihrer Nummer in der Lap-Spalte, und wie weit die
+    Dauer dort von der Rundenzeit im Kopf abweicht. Das steht in
+    `runden_grenzen` und geht so in die Zusammenfassung -- wer die Runde
+    aus den Rohdaten schneidet, soll sehen, ob die Grenze haelt. Ebenso
+    `verworfene_punkte`: die Spannen von Records, die hier nicht zaehlen,
+    weil der Empfaenger seinen Fix verloren hatte. Wer mit den Rohdaten
+    weiterrechnet, soll diese Regel nicht nachbauen muessen.
+
     Return ein dict oder None, wenn die Datei keine Datenzeilen oder keine
     Lap-Spalte hat.
     """
     kopfrunden, spalten = [], None
-    punkte = []                       # (Sekunde, km/h, Runde, Breite, Laenge)
+    # (Sekunde, km/h, Runde, Breite, Laenge, Record)
+    punkte = []
     i_t = i_v = i_lap = i_breite = i_laenge = 0
+    i_record = None
     try:
         datei = open(pfad, encoding='utf-8', errors='replace')
     except OSError:
@@ -1390,6 +1404,8 @@ def runden_aus_export(pfad):
                     i_lap = spalten.index('Lap')
                     i_breite = spalten.index('Latitude')
                     i_laenge = spalten.index('Longitude')
+                    if 'Record' in spalten:
+                        i_record = spalten.index('Record')
                     continue
                 # Die Rundenzeiten aus dem Kopf -- sie sind die Probe darauf,
                 # dass die Lap-Spalte haelt.
@@ -1412,7 +1428,13 @@ def runden_aus_export(pfad):
                 continue
             if jetzt is None:
                 continue
-            punkte.append((jetzt, v, runde, breite, laenge))
+            record = None
+            if i_record is not None:
+                try:
+                    record = int(felder[i_record])
+                except ValueError:
+                    pass
+            punkte.append((jetzt, v, runde, breite, laenge, record))
     if spalten is None:
         return None
 
@@ -1431,8 +1453,16 @@ def runden_aus_export(pfad):
     # durch. Die Meter dagegen werden nur dort gezaehlt, wo wirklich
     # gemessen wurde: Was in einer Luecke gefahren wurde, weiss niemand.
     wanduhr = {}                      # Rundennummer -> Sekunden, alles
+    # Rundennummer -> [erster Record, letzter Record, Punkte]. Alle Punkte
+    # zaehlen, auch die ohne Fix: Die Grenze sagt, welche Zeilen zur Runde
+    # gehoeren, nicht welche davon brauchbar sind.
+    bereich = {}
     vorige = vorige_uhr = None
-    for nr, (jetzt, v, runde, breite, laenge) in enumerate(punkte):
+    for nr, (jetzt, v, runde, breite, laenge, record) in enumerate(punkte):
+        if runde > 0:
+            b = bereich.setdefault(runde, [record, record, 0])
+            b[1] = record
+            b[2] += 1
         if vorige_uhr is not None and jetzt > vorige_uhr:
             wanduhr[runde] = wanduhr.get(runde, 0.0) + (jetzt - vorige_uhr)
         vorige_uhr = jetzt
@@ -1463,12 +1493,44 @@ def runden_aus_export(pfad):
     # Session auf 0,032 s stimmten. Der Fehler lag in der Probe.
     probe = max((abs(wanduhr.get(nr, 0.0) - soll) for nr, soll in kopfrunden),
                 default=0.0)
+    # Die verworfenen Punkte als zusammenhaengende Spannen. Ohne
+    # Record-Spalte liesse sich keine Spanne benennen -- dann steht dort
+    # None und nicht eine leere Liste, die "nichts verworfen" behauptete.
+    verworfen = None
+    if i_record is not None:
+        verworfen = []
+        for nr in sorted(ungueltig):
+            record = punkte[nr][5]
+            if verworfen and verworfen[-1]['bis_index'] == nr - 1:
+                verworfen[-1]['record_bis'] = record
+                verworfen[-1]['punkte'] += 1
+                verworfen[-1]['bis_index'] = nr
+            else:
+                verworfen.append({'record_von': record, 'record_bis': record,
+                                  'punkte': 1, 'grund': 'ohne_fix',
+                                  'bis_index': nr})
+        for spanne in verworfen:
+            del spanne['bis_index']
+    grenzen = []
+    for nr, soll in kopfrunden:
+        von, bis, anzahl_punkte = bereich.get(nr, [None, None, 0])
+        grenzen.append({
+            'nr': nr, 'record_von': von, 'record_bis': bis,
+            'punkte': anzahl_punkte,
+            # Mit Vorzeichen: positiv heisst, die Lap-Spalte fasst mehr
+            # Zeit als die Rundenzeit im Kopf. Zwei benachbarte Runden mit
+            # gleich grossem, entgegengesetztem Wert sind die verschobene
+            # Rundengrenze aus TECHNIK.md.
+            'abweichung': round(wanduhr.get(nr, 0.0) - soll, 3),
+        })
     return {
         'runden_version': RUNDEN_VERSION,
         'meter_runden': round(meter),
         'fahrzeit_runden': round(fahrzeit, 1),
         'meter_export': round(meter_alle),
         'runden_probe': round(probe, 3),
+        'runden_grenzen': grenzen,
+        'verworfene_punkte': verworfen,
     }
 
 
@@ -1531,9 +1593,15 @@ def raender_entschaerfen(runden, meta):
     Zeit wird nie eine Bestzeit. Sie koennen aber zu kurz sein: Wer zwei
     Sekunden vor einem Splitpunkt auf Aufnahme drueckt, bekaeme sonst
     einen Sektorrekord geschenkt, den niemand gefahren ist.
+
+    Welche Positionen verworfen wurden, steht danach je Runde in
+    `randsektoren` (1-basiert). Aus der Null allein liesse es sich nicht
+    mehr ablesen -- sie sieht aus wie ein Sektor, der nie gemessen wurde.
     """
     if not runden:
         return
+    for runde in runden:
+        runde['randsektoren'] = []
     dauer = meta.get('duration') or 0
     punkte = meta.get('records') or 0
     rate = (punkte / dauer) if dauer else 0
@@ -1545,10 +1613,13 @@ def raender_entschaerfen(runden, meta):
             for i, wert in enumerate(runden[0]['sektoren']):
                 if wert > 0:
                     runden[0]['sektoren'][i] = 0.0
+                    runden[0]['randsektoren'].append(i + 1)
                     break
 
     linien = meta.get('lapEvents')
     if linien is not None and len(runden) > linien:
+        if runden[-1]['sektoren'][-1] > 0:
+            runden[-1]['randsektoren'].append(len(runden[-1]['sektoren']))
         runden[-1]['sektoren'][-1] = 0.0
 
 
@@ -1829,6 +1900,8 @@ def cache_lesen(ordner=None):
                 eintrag = json.load(f)
         except (ValueError, OSError):
             continue      # kaputte Datei: beim naechsten Lauf neu holen
+        # Ohne Kennung keine Session -- so bleibt auch die Zusammenfassung
+        # draussen, die im selben Ordner liegt.
         if eintrag.get('id'):
             raus[eintrag['id']] = eintrag
     return raus
@@ -1966,10 +2039,16 @@ def runden(sessions, layout):
             abgeleitet = runde.get('abgeleitet')
             if abgeleitet is None and session.get('quelle') == 'json':
                 abgeleitet = len(runde['sektoren'])   # aeltere Eintraege
+            # Was hier oder spaeter verworfen wird, bleibt mit Grund
+            # vermerkt -- die Zusammenfassung nennt es, statt dass es nur
+            # fehlt.
+            verworfen = {}
             if not vollstaendig and abgeleitet in werte:
                 del werte[abgeleitet]
+                verworfen[abgeleitet] = 'gerechnet_in_teilrunde'
             raus.append({
                 'session': session,
+                'eintrag': runde,
                 'nr': runde['nr'],
                 'zeit': runde['zeit'],
                 'sektoren': werte,
@@ -1979,6 +2058,12 @@ def runden(sessions, layout):
                 # Luecke, die sie selbst gerissen hat.
                 'luecke': round(runde['zeit'] - sum(sektoren), 3),
                 'vollstaendig': vollstaendig,
+                # `vollstaendig` kann spaeter noch fallen, wenn ein Sektor
+                # aussortiert wird. Ob die Runde schon als Teilrunde
+                # gemessen wurde, steht deshalb getrennt.
+                'teilrunde': not vollstaendig,
+                'abgeleitet': abgeleitet,
+                'verworfen': verworfen,
                 'stimmig': stimmig,
             })
     return raus
@@ -2064,12 +2149,16 @@ def mittelwert(werte):
 SEKTOR_SCHWELLE = 0.5
 
 
-def unplausible_sektoren_entfernen(alle_runden, layout):
+def unplausible_sektoren_entfernen(alle_runden, layout, mediane=None):
     """Sektorzeiten aussortieren, die keine Messung mehr sein koennen.
 
     Verglichen wird mit dem Median derselben Sektorposition ueber alle
     vollstaendigen Runden. Der Median ist dafuer das richtige Mass, weil
     ein einzelner Ausreisser ihn nicht zieht -- anders als der Mittelwert.
+
+    In `mediane` landet je Position der Median, an dem gemessen wurde --
+    ohne ihn waere ein verworfener Sektor in der Zusammenfassung ein Urteil
+    ohne Begruendung.
 
     Return die Zahl der aussortierten Zeiten.
     """
@@ -2080,11 +2169,14 @@ def unplausible_sektoren_entfernen(alle_runden, layout):
         median = mittelwert(werte)
         if median is None:
             continue
+        if mediane is not None:
+            mediane[pos] = median
         schwelle = median * SEKTOR_SCHWELLE
         for runde in alle_runden:
             if pos in runde['sektoren'] and runde['sektoren'][pos] < schwelle:
                 del runde['sektoren'][pos]
                 runde['vollstaendig'] = False
+                runde.setdefault('verworfen', {})[pos] = 'unter_halbem_median'
                 entfernt += 1
     return entfernt
 
@@ -2092,7 +2184,8 @@ def unplausible_sektoren_entfernen(alle_runden, layout):
 def auswerten(sessions, layout):
     """Alle Kennzahlen einer Strecke-Fahrzeug-Kombination."""
     alle = runden(sessions, layout)
-    aussortiert = unplausible_sektoren_entfernen(alle, layout)
+    mediane = {}
+    aussortiert = unplausible_sektoren_entfernen(alle, layout, mediane)
     theo, teile = theoretische_runde(alle, layout)
     streng, streng_teile = theoretische_runde(alle, layout, True)
     best = beste_runde(alle)
@@ -2145,6 +2238,7 @@ def auswerten(sessions, layout):
         'anzahl_vollstaendig': sum(1 for r in alle if r['vollstaendig']),
         'anzahl_unstimmig': sum(1 for r in alle if not r['stimmig']),
         'aussortiert': aussortiert,
+        'mediane': mediane,
         # Wie weit die drittbeste Runde von der besten weg ist. Eine kleine
         # Streuung heisst: die Bestzeit war kein Ausreisser, du kannst sie.
         'streuung': (mittelwert([r['zeit'] for r in top[1:]]) - top[0]['zeit'])
@@ -2490,6 +2584,345 @@ def strecken_bauen(sessions, ausblenden=()):
 
     strecken.sort(key=lambda e: e['letzte'], reverse=True)
     return strecken, ausgeblendet, doppelte_paare
+
+
+# --- Zusammenfassung fuer andere Werkzeuge --------------------------------
+#
+# Was Golden Lap weiss und entscheidet, maschinenlesbar: welche Sessions und
+# Runden es gibt, was davon zaehlt und was nicht, samt Grund, und wo jede
+# Runde in den Rohdaten liegt. Die Messpunkte selbst stehen nicht darin --
+# sie liegen in den Originalexporten, und die Zusammenfassung zeigt dorthin.
+#
+# Das ist eine Schnittstelle: Ein anderes Werkzeug liest sie, ohne eine
+# einzige Entscheidung von hier nachzubauen. Beschrieben ist sie in
+# TECHNIK.md unter "Die Zusammenfassung". `ZUSAMMENFASSUNG_VERSION` steigt
+# nur, wenn ein Leser sie nicht mehr versteht -- ein neues Feld tut das
+# nicht, ein umbenanntes oder umgedeutetes schon.
+
+ZUSAMMENFASSUNG = 'golden-lap-summary.json'
+ZUSAMMENFASSUNG_FORMAT = 'racebox-golden-lap-summary'
+ZUSAMMENFASSUNG_VERSION = 1
+
+
+def pfad_relativ(pfad, ordner):
+    """`pfad` von `ordner` aus gesehen, mit `/` getrennt.
+
+    Relativ, damit die Zusammenfassung stimmt, wenn der ganze Ordner
+    umzieht. Unter Windows geht das nicht ueber Laufwerke hinweg -- dann
+    bleibt der absolute Pfad.
+    """
+    try:
+        pfad = os.path.relpath(pfad, ordner)
+    except ValueError:
+        pfad = os.path.abspath(pfad)
+    return pfad.replace(os.sep, '/')
+
+
+def runden_verweis(runde):
+    """Eine Runde als Verweis: Session, Rundennummer, Zeit."""
+    if runde is None:
+        return None
+    return {'session': runde['session']['id'], 'nr': runde['nr'],
+            'zeit': runde['zeit']}
+
+
+def teile_text(zeit, teile, layout):
+    """Eine theoretische Runde und woraus sie besteht."""
+    return {
+        'zeit': round(zeit, 3) if zeit is not None else None,
+        'teile': [{'position': pos, 'nummer': sektor_nummer(layout, pos),
+                   'zeit': r['sektoren'][pos], 'session': r['session']['id'],
+                   'nr': r['nr'], 'teilrunde': not r['vollstaendig']}
+                  for pos, r in teile],
+    }
+
+
+def eigene_positionen(session):
+    """Die Sektorpositionen einer Session, wenn sie nicht gewertet wird.
+
+    Aus der Streckenkonfiguration, wenn sie bekannt ist; sonst die
+    belegten Felder, wie beim Bestimmen des Layouts.
+    """
+    if session.get('splits') is not None:
+        return tuple(range(1, session['splits'] + 2))
+    belegt = set()
+    for runde in session.get('runden', []):
+        belegt |= {i + 1 for i, w in enumerate(runde['sektoren']) if w > 0}
+    return tuple(sorted(belegt))
+
+
+def sektor_urteil(session, runde, pos, gewertet, layout):
+    """Ob eine Sektorzeit in die Bestzeiten eingeht, und wenn nicht, warum.
+
+    Return (zaehlt, grund). Die Gruende sind ein fester Wortschatz, den
+    TECHNIK.md erklaert -- ein Leser soll sie vergleichen, nicht deuten.
+    """
+    sektoren = runde['sektoren']
+    wert = sektoren[pos - 1] if pos <= len(sektoren) else 0.0
+    if wert <= 0:
+        if pos in runde.get('randsektoren', ()):
+            return False, 'randsektor'
+        # Aeltere Eintraege aus dem JSON haben ihre Randsektoren schon auf
+        # null gesetzt, ohne es zu vermerken. Was davon verworfen und was
+        # nie gemessen wurde, laesst sich nicht mehr sagen -- also wird es
+        # nicht behauptet.
+        if session.get('quelle') == 'json' and 'randsektoren' not in runde:
+            return False, 'unbekannt'
+        return False, 'nicht_gemessen'
+    if gewertet is None:
+        return False, 'session_nicht_gewertet'
+    if pos not in layout:
+        return False, 'ausserhalb_einteilung'
+    if pos in gewertet.get('verworfen', {}):
+        return False, gewertet['verworfen'][pos]
+    if not gewertet['stimmig']:
+        return False, 'runde_unstimmig'
+    return True, None
+
+
+def zusammenfassung_bauen(sessions, ordner, csv_ordner=None):
+    """Die Zusammenfassung als dict. Pfade darin sind relativ zu `ordner`.
+
+    Ohne Ausblendliste und ohne Fahrzeugfilter: Beides regelt, was man
+    sieht, nicht was gefahren wurde. Die Rechnung ist dieselbe wie in der
+    Anzeige -- `strecken_bauen` -- und nicht eine zweite daneben.
+    """
+    csv_ordner = csv_ordner or CSV_ORDNER
+    strecken, _, paare = strecken_bauen(sessions)
+
+    status, gewertete_runden, strecke_von = {}, {}, {}
+    for eintrag in strecken:
+        abweichend = {s['id'] for s in eintrag['abweichend']}
+        for s in eintrag['sessions']:
+            strecke_von[s['id']] = eintrag
+            if eintrag['layout'] is None:
+                status[s['id']] = 'ohne_einteilung'
+            elif s['id'] in abweichend:
+                status[s['id']] = 'abweichende_einteilung'
+            else:
+                status[s['id']] = 'gewertet'
+        # Zugeordnet ueber die Session und das Rundenobjekt aus dem Cache.
+        # Die Kennung allein reicht nicht: Zwei Eintraege koennen dieselbe
+        # Runde enthalten, und nur einer davon ist gewertet.
+        for z in eintrag['fahrzeuge']:
+            for r in z['alle_runden']:
+                gewertete_runden[(r['session']['id'], id(r['eintrag']))] = r
+
+    dubletten = {}
+    for befund in doppelte_vergleichen(paare, csv_ordner):
+        dubletten[befund['kurz']['id']] = (befund['lang']['id'], {
+            'exporte_fehlen': bool(befund['fehlend']),
+            'gleich': befund['gleich'],
+            'abweichend': len(befund['abweichend']),
+            'nur_in_behaltener': len(befund['nur_lang']),
+            'nur_in_dieser': len(befund['nur_kurz']),
+            'nummer_verschoben': len(befund['verschoben']),
+        })
+
+    raus_sessions = []
+    for s in sorted(sessions, key=lambda x: (sortier_schluessel(x),
+                                             x.get('id', ''))):
+        sid = s.get('id', '')
+        eintrag = strecke_von.get(sid)
+        layout = eintrag['layout'] if eintrag else None
+        k = s.get('kennzahlen') or {}
+
+        pfad = export_pfad(sid, csv_ordner)
+        vorhanden = os.path.exists(pfad)
+        grenzen = None
+        if not vorhanden:
+            grund = 'kein_export'
+        elif s.get('quelle') == 'json':
+            # Die Runden kamen aus dem JSON, und das zaehlt die
+            # Einfahrrunde mit: Seine Nummern sind nicht die der Lap-Spalte.
+            grund = 'runden_aus_json'
+        elif k.get('runden_version', 0) < RUNDEN_VERSION:
+            # Ohne Telemetrie im Cache wurde der Export nie gelesen. Das ist
+            # kein Urteil ueber die Datei, und so heisst es auch.
+            grund = 'nicht_ausgewertet'
+        elif 'runden_grenzen' not in k:
+            grund = 'export_unvollstaendig'
+        else:
+            grund = None
+            grenzen = {g['nr']: g for g in k['runden_grenzen']}
+
+        if sid in dubletten:
+            zustand = 'dublette'
+        else:
+            zustand = status.get(sid, 'ohne_einteilung')
+        positionen = (layout if zustand == 'gewertet'
+                      else eigene_positionen(s))
+
+        raus_runden = []
+        for runde in s.get('runden', []):
+            gewertet = gewertete_runden.get((sid, id(runde)))
+            if gewertet is None:
+                zaehlt, runde_grund = False, 'session_nicht_gewertet'
+            elif gewertet['vollstaendig']:
+                zaehlt, runde_grund = True, None
+            elif gewertet['teilrunde']:
+                zaehlt, runde_grund = False, 'teilrunde'
+            else:
+                zaehlt, runde_grund = False, 'sektor_verworfen'
+            abgeleitet = (gewertet['abgeleitet'] if gewertet
+                          else runde.get('abgeleitet'))
+            belegt = {i + 1 for i, w in enumerate(runde['sektoren']) if w > 0}
+            raus_sektoren = []
+            for pos in sorted(set(positionen) | belegt):
+                wert = (runde['sektoren'][pos - 1]
+                        if pos <= len(runde['sektoren']) else 0.0)
+                s_zaehlt, s_grund = sektor_urteil(s, runde, pos, gewertet,
+                                                  positionen)
+                raus_sektoren.append({
+                    'position': pos,
+                    'nummer': (positionen.index(pos) + 1
+                               if pos in positionen else None),
+                    'zeit': wert if wert > 0 else None,
+                    'gerechnet': pos == abgeleitet,
+                    'zaehlt': s_zaehlt,
+                    'grund': s_grund,
+                })
+            roh = None
+            if grenzen is not None:
+                g = grenzen.get(runde['nr'])
+                roh = {'lap': runde['nr'],
+                       'record_von': g['record_von'] if g else None,
+                       'record_bis': g['record_bis'] if g else None,
+                       'punkte': g['punkte'] if g else 0,
+                       'abweichung': g['abweichung'] if g else None,
+                       'auffaellig': (abs(g['abweichung']) > PROBE_GRENZE
+                                      if g else True)}
+            raus_runden.append({
+                'nr': runde['nr'],
+                'zeit': runde['zeit'],
+                'stimmig': runde.get('stimmig', True),
+                'vollstaendig': gewertet['vollstaendig'] if gewertet else None,
+                'teilrunde': gewertet['teilrunde'] if gewertet else None,
+                'zaehlt': zaehlt,
+                'grund': runde_grund,
+                'sektoren': raus_sektoren,
+                'rohdaten': roh,
+            })
+
+        behalten, vergleich = dubletten.get(sid, (None, None))
+        raus_sessions.append({
+            'id': sid,
+            'strecke': s.get('strecke') or '(ohne Strecke)',
+            'konfiguration': s.get('konfiguration', ''),
+            'konfig_id': s.get('konfig_id'),
+            'fahrzeug': s.get('fahrzeug', 'ohne Fahrzeug'),
+            'fahrzeug_id': s.get('fahrzeug_id'),
+            'datum': s.get('datum'),
+            'startzeit': s.get('startzeit'),
+            'datum_utc': s.get('datum_utc'),
+            'turn': s.get('turn'),
+            'quelle': s.get('quelle', 'csv'),
+            'cache_version': s.get('version'),
+            'status': zustand,
+            'dublette_von': behalten,
+            'dublettenvergleich': vergleich,
+            'rohdaten': {
+                'datei': pfad_relativ(pfad, ordner),
+                'vorhanden': vorhanden,
+                'lap_spalte': grund is None,
+                'grund': grund,
+                'runden_probe': k.get('runden_probe'),
+                # Unabhaengig davon, woher die Runden kamen: Ob ein
+                # Messpunkt eine Messung ist, sagt der Export selbst.
+                'verworfene_punkte': k.get('verworfene_punkte'),
+            },
+            'runden': raus_runden,
+        })
+
+    raus_auswertungen = []
+    for eintrag in sorted(strecken, key=lambda e: (e['strecke'],
+                                                   e['konfiguration'])):
+        layout = eintrag['layout']
+        gewertet_ids = [s['id'] for s in eintrag['sessions']
+                        if status.get(s['id']) == 'gewertet']
+        konfig_ids = [s.get('konfig_id') for s in eintrag['sessions']
+                      if s['id'] in gewertet_ids and s.get('konfig_id')]
+        fahrzeuge = []
+        for z in sorted(eintrag['fahrzeuge'], key=lambda z: z['fahrzeug']):
+            fahrzeuge.append({
+                'fahrzeug': z['fahrzeug'],
+                'sessions': [s['id'] for s in
+                             sorted(z['sessions'], key=sortier_schluessel)],
+                'mediane': [{'position': pos,
+                             'nummer': sektor_nummer(layout, pos),
+                             'median': round(median, 3),
+                             'grenze': round(median * SEKTOR_SCHWELLE, 3)}
+                            for pos, median in sorted(z['mediane'].items())],
+                'aussortiert': z['aussortiert'],
+                'bestrunde': runden_verweis(z['best']),
+                'top_runden': [runden_verweis(r) for r in z['top_runden']],
+                'streuung': (round(z['streuung'], 3)
+                             if z['streuung'] is not None else None),
+                'golden_lap': teile_text(z['theo'], z['theo_teile'], layout),
+                'golden_lap_ohne_teilrunden': teile_text(
+                    z['theo_streng'], z['theo_streng_teile'], layout),
+                'delta': round(z['delta'], 3) if z['delta'] is not None
+                         else None,
+                'unglaubwuerdig': z['unglaubwuerdig'],
+                'je_turn': [{'session': t['session']['id'],
+                             'bestrunde': runden_verweis(t['best']),
+                             'theo': (round(t['theo'], 3)
+                                      if t['theo'] is not None else None),
+                             'runden': t['runden']}
+                            for t in z['je_turn']],
+                'je_tag': [{'datum': t['datum'], 'turns': t['turns'],
+                            'bestrunde': runden_verweis(t['best']),
+                            'theo': (round(t['theo'], 3)
+                                     if t['theo'] is not None else None),
+                            'runden': t['runden']}
+                           for t in z['je_tag']],
+            })
+        raus_auswertungen.append({
+            'strecke': eintrag['strecke'],
+            'konfiguration': eintrag['konfiguration'],
+            'layout_nr': eintrag['layout_nr'],
+            'konfig_id': konfig_ids[0] if konfig_ids else None,
+            'layout': list(layout) if layout else None,
+            'sessions_abweichend': [s['id'] for s in eintrag['abweichend']],
+            'fahrzeuge': fahrzeuge,
+        })
+
+    return {
+        'format': ZUSAMMENFASSUNG_FORMAT,
+        'version': ZUSAMMENFASSUNG_VERSION,
+        'erzeugt': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'rohdaten_ordner': pfad_relativ(csv_ordner, ordner),
+        'regeln': {'sektor_schwelle': SEKTOR_SCHWELLE,
+                   'probe_grenze': PROBE_GRENZE,
+                   'ortsgrenze': ORTSGRENZE,
+                   'fixerholung': FIXERHOLUNG},
+        'sessions': raus_sessions,
+        'auswertungen': raus_auswertungen,
+    }
+
+
+def zusammenfassung_schreiben(sessions, ordner=None, csv_ordner=None):
+    """Die Zusammenfassung in den Cache-Ordner schreiben. Return den Pfad.
+
+    Bei jedem Lauf und ohne Rueckfrage: Eine Schnittstelle, die nur
+    manchmal stimmt, ist keine. Scheitert das Schreiben, laeuft das
+    Werkzeug trotzdem weiter -- gesagt wird es, und die Anzeige braucht
+    die Datei nicht.
+    """
+    ordner = cache_pfad(ordner)
+    pfad = os.path.join(ordner, ZUSAMMENFASSUNG)
+    daten = zusammenfassung_bauen(sessions, ordner, csv_ordner)
+    try:
+        ordner_anlegen(ordner)
+        vorlaeufig = pfad + '.neu'
+        with open(vorlaeufig, 'w', encoding='utf-8') as f:
+            json.dump(daten, f, ensure_ascii=False, indent=1)
+        os.replace(vorlaeufig, pfad)
+    except OSError as e:
+        melde('Die Zusammenfassung liess sich nicht schreiben (%s): %s'
+              % (pfad, e))
+        return None
+    return pfad
 
 
 # --- Ausgabe --------------------------------------------------------------
@@ -3854,6 +4287,19 @@ def main(argv=None):
         melde('Ausblendliste ergaenzen ...')
         ausblenden_ergaenzen(a.ausblenden)
         melde()
+    # Die Rundenkilometer kommen aus den abgelegten Exporten und werden
+    # einmal je Session gerechnet -- immer, nicht nur wenn die Statistik
+    # gleich drankommt. Hier stand einmal eine Bedingung aus vier Teilen,
+    # die das an `--strecke`, `--muster` und ein Terminal knuepfte, um beim
+    # ersten Lauf ein paar Sekunden zu sparen. Die Sekunden waren den Satz
+    # nicht wert.
+    runden_km_ergaenzen(sessions, None, cache_ordner)
+
+    # Vor jeder Ansicht und vor jedem Abbruch wegen Filtern: Die
+    # Zusammenfassung haengt an keinem davon und soll bei jedem Lauf
+    # stimmen. Sie braucht die Rundengrenzen von eben.
+    zusammenfassung_schreiben(sessions, cache_ordner)
+
     muster = [] if a.alle else ausblenden_lesen()
     strecken, ausgeblendet, doppelte = strecken_bauen(sessions, muster)
     # Derselbe Schalter wie beim Holen: Wer nur ein Fahrzeug holen wollte,
@@ -3865,14 +4311,6 @@ def main(argv=None):
     if not strecken:
         raise SystemExit('Alle %d Strecke(n) sind ausgeblendet. Mit --alle '
                          'anzeigen.' % len(ausgeblendet))
-
-    # Die Rundenkilometer kommen aus den abgelegten Exporten und werden
-    # einmal je Session gerechnet -- immer, nicht nur wenn die Statistik
-    # gleich drankommt. Hier stand einmal eine Bedingung aus vier Teilen,
-    # die das an `--strecke`, `--muster` und ein Terminal knuepfte, um beim
-    # ersten Lauf ein paar Sekunden zu sparen. Die Sekunden waren den Satz
-    # nicht wert.
-    runden_km_ergaenzen(sessions, None, cache_ordner)
 
     # Die Statistik haengt nicht am Sektorlayout -- sie wird deshalb aus
     # den Sessions gebaut und nicht aus den fertigen Strecken. Kosten tut

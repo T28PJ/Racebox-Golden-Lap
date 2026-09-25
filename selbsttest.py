@@ -376,6 +376,18 @@ def test_randsektoren():
     gleich(rand['runden'][-1]['sektoren'][:3], [29.0, 26.0, 20.0],
            'ihre uebrigen Sektoren sind trotzdem gemessen worden')
 
+    # Die Null allein sagt nicht, ob verworfen oder nie gemessen -- der
+    # Eintrag muss es sich merken, sonst kann die Zusammenfassung es nicht
+    # nennen.
+    gleich(rand['runden'][0]['randsektoren'], [4],
+           'der verworfene Anfang ist als Randsektor vermerkt')
+    gleich(rand['runden'][-1]['randsektoren'], [4],
+           'das verworfene Ende ebenso')
+    gleich(rand['runden'][1]['randsektoren'], [],
+           'eine Runde dazwischen hat keinen')
+    gleich(normal['runden'][0]['randsektoren'], [],
+           'was nicht verworfen wurde, steht nicht darin')
+
 
 def test_ungewohnte_formen():
     """Was das Werkzeug nicht kennt, darf es nicht umwerfen."""
@@ -797,6 +809,210 @@ Lap 2, 89.500, sectors, 29.000,26.000,20.000,0,14.500
                'ohne Doppelte sagt die Ausgabe genau das')
     finally:
         shutil.rmtree(ordner)
+
+
+def test_zusammenfassung():
+    """Die Zusammenfassung sagt, was zaehlt und warum -- und wo es liegt.
+
+    Ein anderes Werkzeug liest sie, ohne eine Entscheidung von hier
+    nachzubauen. Jeder Grund, aus dem etwas nicht zaehlt, kommt deshalb
+    hier einmal vor, und jeder muss genau so in der Datei stehen.
+    """
+    basis = tempfile.mkdtemp()
+    try:
+        cache = os.path.join(basis, 'cache')
+        csv = os.path.join(basis, 'csv')
+        os.makedirs(csv)
+
+        def aus_json(sid, **wie):
+            kopf, angaben, fzg, linien = TESTSESSIONS[sid]
+            return S.session_aus_json(sid, json_aus_kopf(
+                sid, kopf, angaben, FAHRZEUGE[FZG_KURZ[fzg]], linien, **wie))
+
+        def export(sid, text):
+            with open(S.export_pfad(sid, csv), 'w', encoding='utf-8') as f:
+                f.write(text)
+
+        # Talkurs kommt ueber den JSON-Weg, der Rest bleibt, wie er ist.
+        a = aus_json('a' * 24)
+        # Ein aelterer Eintrag: Seine Randsektoren sind schon null, aber
+        # nicht vermerkt.
+        for runde in a['runden']:
+            del runde['randsektoren']
+        a['runden'] += [
+            # Eine verpasste Splitueberfahrt: 0.27 s, sonst stehen dort 28.
+            {'nr': 99, 'zeit': 90.0, 'stimmig': True, 'abgeleitet': None,
+             'sektoren': [0.27, 25.0, 20.0, 44.73]},
+            # Sektoren, die ihre Rundenzeit nicht ergeben.
+            {'nr': 98, 'zeit': 95.0, 'stimmig': False, 'abgeleitet': None,
+             'sektoren': [29.5, 25.0, 20.0, 15.0]}]
+        b = aus_json('b' * 24, beginnt_bei_null=True)
+        kopf_c = TESTSESSIONS['c' * 24]
+        c = S.session_aus_json('c' * 24, json_aus_kopf(
+            'c' * 24, kopf_c[0], kopf_c[1], 'Suzuki SV650', kopf_c[3]),
+            csv_runden=S.kopf_lesen(kopf_c[0])['runden'])
+        # Eine Teilaufnahme von b unter eigener Kennung.
+        y = dict(b, id='y' * 24, runden=b['runden'][:1])
+        # Eine Strecke, von der es nur ein Teilstueck gibt.
+        leer = dict(sessions_bauen()[0], id='9' * 24, strecke='Leerplatz',
+                    runden=[{'nr': 1, 'zeit': 10.0, 'stimmig': True,
+                             'sektoren': [0, 0, 0, 0, 10.0]}])
+        uebrige = [s for s in sessions_bauen()
+                   if s['id'][0] not in 'abc']
+        e = [s for s in uebrige if s['id'] == 'e' * 24][0]
+        e['kennzahlen'] = {'runden_version': S.RUNDEN_VERSION}
+        sessions = [a, b, c, y, leer] + uebrige
+
+        export('a' * 24, export_bauen())
+        export('b' * 24, KOPF_S2)
+        export('y' * 24, KOPF_S2)
+        # Die Lap-Spalte fasst in Runde 1 vier Sekunden, der Kopf sagt sechs.
+        # Mit einem Ausfall davor, wie ihn ein Empfaenger ohne Fix schreibt.
+        export('c' * 24, export_bauen(ausfall=True)
+               .replace('Lap 1, 4.000', 'Lap 1, 6.000'))
+        export('e' * 24, export_bauen().replace(',Lap,', ',Runde,'))
+        # Ein Eintrag aus dem alten CSV-Weg hat keine Telemetrie -- sein
+        # Export wird deshalb nie gelesen, auch wenn er daliegt.
+        export('f' * 24, export_bauen())
+        still(S.runden_km_ergaenzen, sessions, csv, cache)
+
+        pfad = S.zusammenfassung_schreiben(sessions, cache, csv)
+        gleich(os.path.dirname(pfad), cache, 'sie liegt im Cache-Ordner')
+        with open(pfad, encoding='utf-8') as f:
+            z = json.load(f)
+        gleich((z['format'], z['version']),
+               ('racebox-golden-lap-summary', 1), 'sie nennt Format und Version')
+        gleich(z['regeln'], {'sektor_schwelle': 0.5, 'probe_grenze': 1.0,
+                             'ortsgrenze': 100000, 'fixerholung': 1.0},
+               'und die Grenzen, nach denen geurteilt wurde')
+
+        je = {s['id']: s for s in z['sessions']}
+        gleich(len(je), len(sessions),
+               'jede Session steht darin, auch ausgeblendete und doppelte')
+
+        def runde(sid, nr):
+            return [r for r in je[sid]['runden'] if r['nr'] == nr][0]
+
+        def sektor(sid, nr, pos):
+            return [s for s in runde(sid, nr)['sektoren']
+                    if s['position'] == pos][0]
+
+        # -- Sessions ------------------------------------------------------
+        gleich(je['a' * 24]['status'], 'gewertet', 'eine gezaehlte Session')
+        gleich(je['d' * 24]['status'], 'abweichende_einteilung',
+               'eine Session mit alter Splitteilung ist benannt')
+        gleich(je['9' * 24]['status'], 'ohne_einteilung',
+               'eine Strecke ohne vollstaendige Runde hat keine Einteilung')
+        gleich((je['y' * 24]['status'], je['y' * 24]['dublette_von']),
+               ('dublette', 'b' * 24),
+               'die ausgeschiedene Fassung einer Dublette nennt die behaltene')
+        gleich(je['y' * 24]['dublettenvergleich']['gleich'], 3,
+               'samt dem Vergleich der beiden Exporte')
+        gleich(je['b' * 24]['dublette_von'], None,
+               'die behaltene ist selbst keine Dublette')
+        gleich((runde('y' * 24, 1)['zaehlt'], runde('y' * 24, 1)['grund']),
+               (False, 'session_nicht_gewertet'),
+               'die Runden einer Dublette zaehlen nicht')
+
+        # -- Runden --------------------------------------------------------
+        gleich((runde('a' * 24, 2)['zaehlt'], runde('a' * 24, 2)['grund']),
+               (True, None), 'eine vollstaendige Runde zaehlt')
+        gleich((runde('a' * 24, 1)['zaehlt'], runde('a' * 24, 1)['grund']),
+               (False, 'teilrunde'), 'eine Teilrunde zaehlt nicht als Runde')
+        gleich((runde('a' * 24, 99)['zaehlt'], runde('a' * 24, 99)['grund'],
+                runde('a' * 24, 99)['teilrunde']),
+               (False, 'sektor_verworfen', False),
+               'eine Runde mit verworfenem Sektor ist keine Teilrunde, zaehlt '
+               'aber nicht mehr')
+
+        # -- Sektoren ------------------------------------------------------
+        gleich((sektor('a' * 24, 2, 1)['zaehlt'], sektor('a' * 24, 2, 1)['zeit']),
+               (True, 30.0), 'ein gemessener Sektor zaehlt')
+        gleich(sektor('a' * 24, 99, 1)['grund'], 'unter_halbem_median',
+               'die 0.27 s sind mit Grund verworfen')
+        gleich(sektor('a' * 24, 99, 1)['zeit'], 0.27,
+               'und die gemessene Zeit steht trotzdem da')
+        gleich(sektor('a' * 24, 98, 2)['grund'], 'runde_unstimmig',
+               'eine unstimmige Runde liefert keine Sektorzeit')
+        gleich((sektor('a' * 24, 1, 4)['grund'],
+                sektor('a' * 24, 1, 4)['gerechnet']),
+               ('gerechnet_in_teilrunde', True),
+               'ein gerechneter Schlusssektor in einer Teilrunde zaehlt nicht')
+        gleich(sektor('a' * 24, 1, 1)['grund'], 'unbekannt',
+               'ohne Vermerk wird kein Randsektor behauptet')
+        gleich(sektor('b' * 24, 1, 4)['grund'], 'randsektor',
+               'ein verworfener Randsektor heisst so')
+        gleich(sektor('b' * 24, 1, 1)['grund'], 'nicht_gemessen',
+               'und ein nie gemessener ebenso')
+        gleich(sektor('y' * 24, 1, 4)['grund'], 'randsektor',
+               'eine Null bleibt auch in einer Dublette, was sie war')
+        gleich(sektor('f' * 24, 1, 5)['nummer'], 4,
+               'die Nummer ist die angezeigte, nicht die Feldposition')
+
+        # -- Rohdaten ------------------------------------------------------
+        roh = je['c' * 24]['rohdaten']
+        gleich((roh['vorhanden'], roh['lap_spalte'], roh['grund']),
+               (True, True, None), 'Runden aus dem Export passen zur Lap-Spalte')
+        pruefe(not os.path.isabs(roh['datei'])
+               and os.path.normpath(os.path.join(cache, roh['datei']))
+               == os.path.normpath(S.export_pfad('c' * 24, csv)),
+               'der Pfad zum Export ist relativ zur Zusammenfassung')
+        gleich(runde('c' * 24, 1)['rohdaten'],
+               {'lap': 1, 'record_von': 5, 'record_bis': 8, 'punkte': 4,
+                'abweichung': -2.0, 'auffaellig': True},
+               'je Runde Records, Abweichung und ob sie auffaellt')
+        gleich(roh['verworfene_punkte'],
+               [{'record_von': 1, 'record_bis': 3, 'punkte': 3,
+                 'grund': 'ohne_fix'}],
+               'und welche Messpunkte keine Messung sind')
+        gleich(je['a' * 24]['rohdaten']['verworfene_punkte'], [],
+               'das gilt auch, wenn die Runden aus dem JSON kamen')
+        gleich(je['a' * 24]['rohdaten']['grund'], 'runden_aus_json',
+               'Runden aus dem JSON zaehlen anders als die Lap-Spalte')
+        gleich(runde('a' * 24, 2)['rohdaten'], None,
+               'und bekommen keine Grenze, die nicht stimmt')
+        gleich(je['e' * 24]['rohdaten']['grund'], 'export_unvollstaendig',
+               'ein Export ohne Lap-Spalte ist benannt')
+        gleich(je['f' * 24]['rohdaten']['grund'], 'nicht_ausgewertet',
+               'ein nie gelesener Export wird nicht fuer unvollstaendig '
+               'erklaert')
+        gleich(je['d' * 24]['rohdaten']['grund'], 'kein_export',
+               'ein fehlender Export ebenso')
+
+        # -- Auswertung ----------------------------------------------------
+        strecken, _, _ = S.strecken_bauen(sessions)
+        talkurs = [e for e in strecken if e['strecke'] == 'Talkurs'][0]
+        soll = [f for f in talkurs['fahrzeuge']
+                if f['fahrzeug'] == 'Yamaha MT-07'][0]
+        aus = [x for x in z['auswertungen'] if x['strecke'] == 'Talkurs'][0]
+        ist = [f for f in aus['fahrzeuge']
+               if f['fahrzeug'] == 'Yamaha MT-07'][0]
+        nahe(ist['golden_lap']['zeit'], 86.0,
+             'die Golden Lap aus den gezaehlten Sektoren')
+        nahe(ist['golden_lap']['zeit'], soll['theo'],
+             'dieselbe Zahl wie in der Anzeige')
+        gleich([(t['session'], t['nr']) for t in ist['golden_lap']['teile']],
+               [(r['session']['id'], r['nr']) for _, r in soll['theo_teile']],
+               'aus denselben Runden')
+        gleich(ist['golden_lap']['teile'][0]['teilrunde'], True,
+               'mit Vermerk, welcher Teil aus einer Teilrunde stammt')
+        gleich(ist['bestrunde'], {'session': 'b' * 24, 'nr': 2, 'zeit': 88.3},
+               'die Bestrunde als Verweis')
+        # Ueber alle vollstaendigen Runden, auch die unstimmige 98:
+        # 0.27, 28.5, 29, 29.5, 30.
+        gleich(ist['mediane'][0]['median'], 29.0,
+               'der Median, an dem die 0.27 s gemessen wurden')
+        gleich(aus['sessions_abweichend'], [],
+               'Talkurs hat keine abweichende Session')
+
+        # Der Cache haelt die Datei nicht fuer eine Session.
+        allein = os.path.join(basis, 'allein')
+        S.cache_schreiben(a, allein)
+        S.zusammenfassung_schreiben([a], allein, csv)
+        gleich(list(S.cache_lesen(allein)), ['a' * 24],
+               'die Zusammenfassung liegt im Cache, ist aber keine Session')
+    finally:
+        shutil.rmtree(basis)
 
 
 def test_turn_theo_nutzt_dieselben_runden():
@@ -1788,6 +2004,16 @@ def test_runden_aus_export():
                'dazu')
         gleich(w['runden_probe'], 0.0,
                'die Dauer aus den Datenzeilen trifft die Rundenzeit im Kopf')
+        # Drei Punkte ausserhalb (Record 1 bis 3), dann je vier Punkte
+        # Runde 1 und Runde 2.
+        gleich(w['runden_grenzen'],
+               [{'nr': 1, 'record_von': 4, 'record_bis': 7, 'punkte': 4,
+                 'abweichung': 0.0},
+                {'nr': 2, 'record_von': 8, 'record_bis': 11, 'punkte': 4,
+                 'abweichung': 0.0}],
+               'je Runde erster und letzter Record aus der Lap-Spalte')
+        gleich(w['verworfene_punkte'], [],
+               'ohne Ausfall ist nichts verworfen -- und das steht da')
 
         # Die eine Sekunde Schritttempo liegt unter der Fahrschwelle und
         # zaehlt nirgends mit -- genau wie in der Telemetrie.
@@ -1801,6 +2027,9 @@ def test_runden_aus_export():
             f.write(export_bauen('4.100'))
         gleich(S.runden_aus_export(pfad)['runden_probe'], 0.1,
                'eine Rundenzeit, die nicht zur Lap-Spalte passt, faellt auf')
+        gleich([g['abweichung'] for g in
+                S.runden_aus_export(pfad)['runden_grenzen']], [0.0, -0.1],
+               'und zwar bei der Runde, an der es liegt, mit Vorzeichen')
 
         # Ein Export ohne Lap-Spalte ergibt keine Aufteilung -- und keine
         # erfundene Null.
@@ -1821,6 +2050,12 @@ def test_runden_aus_export():
                'davor')
         gleich(w['meter_export'], 200,
                'und die 900 km/h nach dem Ausfall steuern keinen Meter bei')
+        # Der Punkt ohne Position (Record 2) und alles eine Sekunde davor
+        # und danach: Records 1 bis 3.
+        gleich(w['verworfene_punkte'],
+               [{'record_von': 1, 'record_bis': 3, 'punkte': 3,
+                 'grund': 'ohne_fix'}],
+               'die verworfenen Punkte stehen als Spanne von Records da')
 
         # Setzt die Box mitten in einer Runde aus, zaehlt die Rundenzeit im
         # Kopf die Wanduhr durch. Die Probe muss dagegen halten und nicht
@@ -1931,6 +2166,18 @@ def test_runden_km_ergaenzen():
         gleich(ergaenzt, 1,
                'eine aeltere Version wird aus dem Export neu gerechnet, '
                'ohne etwas zu holen')
+
+        # Fassung 3 kannte die verworfenen Punkte noch nicht, Fassung 2
+        # auch die Grenzen je Runde nicht. Ein solcher Eintrag muss neu
+        # gelesen werden -- mit der Zahl, nicht mit der Konstante, sonst
+        # bemerkte niemand, wenn sie nicht hochgezaehlt wurde.
+        eintraege[0]['kennzahlen']['runden_version'] = 3
+        del eintraege[0]['kennzahlen']['runden_grenzen']
+        del eintraege[0]['kennzahlen']['verworfene_punkte']
+        still(S.runden_km_ergaenzen, eintraege, exporte, cache)
+        pruefe('runden_grenzen' in eintraege[0]['kennzahlen']
+               and 'verworfene_punkte' in eintraege[0]['kennzahlen'],
+               'ein Eintrag aus Fassung 3 wird aus dem Export ergaenzt')
 
         # Ein Export ohne Lap-Spalte wird ebenfalls vermerkt -- sonst
         # wuerde er bei jedem Lauf wieder gelesen.
@@ -2931,6 +3178,12 @@ def test_netz():
                 pruefe('UEBUNGSPLATZ NORD' in text,
                        'ohne eigene Liste wird nichts ausgeblendet')
                 pruefe(ordner in text, 'die Uebersicht nennt den Datenordner')
+                zusammen = os.path.join(ordner, S.ZUSAMMENFASSUNG)
+                pruefe(os.path.exists(zusammen),
+                       'der Lauf legt die Zusammenfassung in den Cache-Ordner')
+                pruefe(len(S.cache_lesen(ordner)) == len(TESTSESSIONS),
+                       'und der Cache haelt sie nicht fuer eine Session')
+                os.remove(zusammen)
 
                 puffer = io.StringIO()
                 with contextlib.redirect_stdout(puffer):
@@ -2944,6 +3197,12 @@ def test_netz():
                 gleich(S.ausblenden_lesen(ordner),
                        ['Uebungsplatz*', 'Kartbahn*'],
                        'und stehen dauerhaft in der Datei')
+                with open(zusammen, encoding='utf-8') as f:
+                    status_darin = {s['strecke']: s['status'] for s in
+                                    json.load(f)['sessions']}
+                gleich(status_darin.get('Uebungsplatz Nord'), 'gewertet',
+                       'auch --nur-cache schreibt die Zusammenfassung, und '
+                       'die Ausblendliste gilt dort nicht')
 
                 puffer = io.StringIO()
                 with contextlib.redirect_stdout(puffer):

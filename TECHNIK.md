@@ -3,7 +3,8 @@
 Alles, was man zum **Benutzen** nicht braucht und zum **Ändern** schon:
 wie die Daten geholt werden, wie die Schnittstelle von racebox.pro
 aussieht, woher die Runden kommen, was aus welchem Grund verworfen wird,
-und wie geprüft wird.
+was die Zusammenfassung für andere Werkzeuge enthält, und wie geprüft
+wird.
 
 Was das Werkzeug tut und wie man es bedient, steht in
 [`README.md`](README.md).
@@ -273,13 +274,286 @@ im JSON `1.00` und `2.00`, während der Export `24.89` und `17.02` auswies —
 das waren die Indizes. Was sich nicht eindeutig als Zeit ausweist, wird
 übergangen.
 
+## Die Zusammenfassung
+
+Dieses Kapitel beschreibt eine Schnittstelle und steht deshalb für sich:
+Wer mit den Daten von Golden Lap weiterrechnet, braucht nur dieses
+Kapitel, nicht den Rest der Datei und nicht den Code.
+
+Golden Lap schreibt bei jedem Lauf `golden-lap-summary.json` in seinen
+Cache-Ordner (Vorgabe: `cache/` neben dem Skript). Darin steht, was
+Golden Lap weiß und entschieden hat: welche Sessions und Runden es gibt,
+was davon zählt und was nicht — jeweils mit Grund —, und wo jede Runde in
+den Rohdaten liegt. Messpunkte stehen darin nicht. Die liegen in den
+Originalexporten von racebox.pro, einer CSV-Datei je Session, und die
+Zusammenfassung zeigt dorthin.
+
+Die Arbeitsteilung: **Die Zusammenfassung sagt, was gilt; die CSV-Exporte
+enthalten die Messung.** Wer Runden vergleichen will, sucht sie in der
+Zusammenfassung aus und schneidet sie dann aus dem Export. Keine Regel
+von Golden Lap muss dafür nachgebaut werden — das Urteil steht da.
+
+Golden Lap misst und rechnet nichts hinzu: keine Distanzachse, keine
+Interpolation, keine Glättung. Was hier steht, ist gemessen oder aus
+einer Messung entschieden.
+
+### Was gilt
+
+- **Anzeigefilter gelten nicht.** Strecken, die Golden Lap in der Anzeige
+  ausblendet, und Fahrzeuge außerhalb seines Fahrzeugfilters stehen darin
+  wie alle anderen. Beides regelt, was man sieht, nicht was gefahren
+  wurde.
+- **Bei jedem Lauf neu**, vor jeder Ansicht, auch ohne Netz. Geschrieben
+  wird erst daneben, dann umbenannt — ein Leser findet nie eine halbe
+  Datei.
+- **Versionen.** `version` steigt, wenn ein Leser die Datei nicht mehr
+  versteht: Ein Feld entfällt, wird umbenannt oder bedeutet etwas
+  anderes, ein Grund ändert seinen Sinn. Ein neues Feld oder ein neuer
+  Grund lässt sie stehen. Ein Leser übergeht also, was er nicht kennt, und
+  behandelt einen unbekannten Grund wie jeden anderen: als „zählt nicht".
+- **Zahlen.** Zeiten in Sekunden als JSON-Zahl, nie als Text. Tage und
+  Zeitpunkte im ISO-Format; `datum` und `startzeit` sind Ortszeit der
+  Strecke, `datum_utc` ist UTC.
+- **`null` heißt „nicht bekannt" oder „trifft nicht zu"**, nie null
+  Sekunden oder null Punkte. Eine leere Liste dagegen heißt: geprüft,
+  nichts gefunden.
+
+### Aufbau
+
+```
+format            "racebox-golden-lap-summary"
+version           1
+erzeugt           Zeitpunkt in UTC
+rohdaten_ordner   Ordner der CSV-Exporte, relativ zur Zusammenfassung
+regeln            die Grenzen, nach denen geurteilt wurde (siehe unten)
+sessions          jede Session, chronologisch
+auswertungen      je Strecke und Streckenkonfiguration, darin je Fahrzeug
+```
+
+`regeln` nennt die Zahlen hinter den Urteilen, damit ein Leser sie
+anzeigen kann, ohne sie zu kennen: `sektor_schwelle` (Anteil am Median,
+unter dem eine Sektorzeit verworfen wird), `probe_grenze` (Sekunden, ab
+denen eine Rundengrenze auffällt), `ortsgrenze` (Meter um die Mitte der
+Aufzeichnung, außerhalb derer ein Punkt keinen Fix hat) und
+`fixerholung` (Sekunden vor und nach einem solchen Punkt, die mit
+verworfen werden).
+
+### Eine Session
+
+Was racebox.pro über sie sagt: `id` (24 Hexzeichen), `strecke`,
+`konfiguration`, `konfig_id`, `fahrzeug`, `fahrzeug_id`, `datum`,
+`startzeit`, `datum_utc`, `turn` (der wievielte Turn des Tages),
+`quelle` (woher Golden Lap die Runden hat: `json+csv` aus dem Export,
+`json` aus der JSON-Antwort, `csv` über den alten Weg) und
+`cache_version`. Dazu das Urteil:
+
+| `status` | heißt |
+|---|---|
+| `gewertet` | ihre Runden gehen in die Auswertung ein |
+| `abweichende_einteilung` | RaceBox hat die Splitpunkte der Strecke seitdem verschoben. Es gilt die Einteilung der neuesten Session; alte und neue Sektorzeiten sind nicht vergleichbar |
+| `ohne_einteilung` | auf dieser Strecke gibt es keine einzige vollständige Runde, aus der sich die Einteilung ablesen ließe |
+| `dublette` | dieselbe Fahrt liegt unter einer zweiten Kennung (gleicher Tag, Startzeit, Turn, Fahrzeug). `dublette_von` nennt die behaltene Fassung — die mit den meisten Runden —, `dublettenvergleich` hält die Exporte beider gegeneinander: `gleich`, `abweichend`, `nur_in_behaltener`, `nur_in_dieser`, `nummer_verschoben`, `exporte_fehlen` |
+
+Unter `rohdaten` steht der Export:
+
+| Feld | heißt |
+|---|---|
+| `datei` | Pfad zum CSV-Export, relativ zur Zusammenfassung, mit `/` getrennt |
+| `vorhanden` | ob die Datei da ist |
+| `lap_spalte` | ob die Spalte `Lap` des Exports dieselben Rundennummern trägt wie `runden` |
+| `grund` | warum nicht, sonst `null` |
+| `runden_probe` | größte Abweichung zwischen Lap-Spalte und Rundenzeiten dieser Session, Sekunden |
+| `verworfene_punkte` | Messpunkte, die keine Messung sind, siehe unten |
+
+| `grund` | heißt |
+|---|---|
+| `kein_export` | die Datei fehlt |
+| `runden_aus_json` | die Runden kamen aus der JSON-Antwort, weil der Export keine Rundenzeilen hatte. Das JSON zählt die Einfahrrunde mit, seine Nummern sind nicht die der Lap-Spalte |
+| `export_unvollstaendig` | der Export hat keine Messpunkte, oder ihm fehlt eine der Spalten `Time`, `Latitude`, `Longitude`, `Speed`, `Lap` |
+| `nicht_ausgewertet` | Golden Lap hat den Export nicht gelesen, weil die Session keine Telemetrie im Cache hat (alter CSV-Weg). Über die Datei sagt das nichts |
+
+**`verworfene_punkte`** ist eine Liste von Spannen: `record_von`,
+`record_bis` (Werte der Spalte `Record`, beide eingeschlossen), `punkte`,
+`grund`. Einziger Grund bisher ist `ohne_fix`: Der Empfänger hatte seine
+Position verloren. Er schreibt dann `0/0` als Position — oder eine, die
+weiter als `ortsgrenze` von der Mitte der Aufzeichnung liegt — und liefert
+danach noch eine Weile unmögliche Geschwindigkeiten bei tadelloser
+Position. An einer echten Session standen so 222 km/h auf einer Strecke,
+auf der dasselbe Gerät in drei Jahren nie über 118 kam. Die Spanne
+umfasst deshalb die Punkte ohne Position und alles, was bis
+`fixerholung` Sekunden davor und danach liegt. Die Regel urteilt nach der
+Position, nie nach dem Tempo — eine Obergrenze für die Geschwindigkeit
+gibt es nicht. Die Liste gilt unabhängig von `lap_spalte`. `null` heißt: nicht
+bestimmt — bei `kein_export`, `export_unvollstaendig` und
+`nicht_ausgewertet`, und wenn der Export keine Spalte `Record` hat.
+
+### Eine Runde
+
+| Feld | heißt |
+|---|---|
+| `nr` | Rundennummer; bei `lap_spalte` der Wert in der Spalte `Lap` |
+| `zeit` | Rundenzeit, gemessen |
+| `stimmig` | ob ihre Sektoren ihre Rundenzeit ergeben (auf 0,05 s) |
+| `vollstaendig` | jeder Sektor der geltenden Einteilung ist gemessen und nicht verworfen; `null` außerhalb gewerteter Sessions |
+| `teilrunde` | nicht jeder Sektor gemessen — Ein- und Ausfahrt, verpasste Splitüberfahrt; `null` außerhalb gewerteter Sessions |
+| `zaehlt` | sie kommt als Bestrunde in Frage und geht in Streuung und Rangliste ein |
+| `grund` | warum nicht, sonst `null` |
+| `sektoren` | siehe unten |
+| `rohdaten` | wo sie im Export liegt, siehe unten |
+
+| `grund` | heißt |
+|---|---|
+| `teilrunde` | nicht jeder Sektor gemessen |
+| `sektor_verworfen` | als ganze Runde gemessen, aber ein Sektor fiel unter `sektor_schwelle` mal den Median |
+| `session_nicht_gewertet` | der `status` der Session schließt sie aus |
+
+Eine unstimmige Runde kann zählen: Ihre Rundenzeit ist gemessen, nur die
+Aufteilung auf die Sektoren nicht. Ihre Sektoren zählen dann nicht.
+
+**`rohdaten` einer Runde** steht nur bei `lap_spalte`, sonst `null`:
+`lap` (der Wert in der Spalte `Lap`), `record_von` und `record_bis`
+(erster und letzter `Record` mit diesem Wert), `punkte` (wie viele),
+`abweichung` und `auffaellig`. `abweichung` sagt, wie viele Sekunden die
+Punkte der Lap-Spalte mehr umfassen als die Rundenzeit — mit Vorzeichen.
+Üblich sind wenige Hundertstel, eine Abtastung. `auffaellig` heißt: Der
+Betrag liegt über `probe_grenze`. Dann stimmt die Rundenzeit, aber nicht
+die Zuordnung der Messpunkte: Verpasst die Box eine Splitüberfahrt am
+Rundenanfang, wandert die Grenze in die Nachbarrunde, und zwei
+benachbarte Runden zeigen gleich große, entgegengesetzte Abweichungen.
+Wer Runden übereinanderlegt, sollte eine auffällige Runde nicht nehmen.
+Eine Runde ohne einen einzigen Punkt hat `record_von` und `record_bis`
+`null` und ist auffällig.
+
+### Ein Sektor
+
+| Feld | heißt |
+|---|---|
+| `position` | Stelle in der Sektorliste von Golden Lap, 1-basiert |
+| `nummer` | die Nummer, unter der RaceBox und Golden Lap den Sektor zeigen |
+| `zeit` | gemessene Zeit, `null` wenn keine |
+| `gerechnet` | die Zeit ist nicht gemessen, sondern Rundenzeit minus übrige Sektoren (nur bei Runden aus dem JSON) |
+| `zaehlt` | sie kann eine Sektorbestzeit werden |
+| `grund` | warum nicht, sonst `null` |
+
+Maßgeblich für einen Leser ist `nummer`; `position` weicht nur bei
+Sessions ab, die über den alten CSV-Weg kamen.
+
+| `grund` | heißt |
+|---|---|
+| `nicht_gemessen` | an dieser Stelle steht keine Zeit |
+| `randsektor` | am Rand der Aufzeichnung verworfen: Die Aufnahme begann mitten im Sektor oder endete vor dem Ziel |
+| `unbekannt` | keine Zeit, aber ob verworfen oder nie gemessen, ist bei diesem älteren Eintrag nicht mehr zu sagen |
+| `gerechnet_in_teilrunde` | gerechnete Zeit in einer Teilrunde — die Differenz zu einer Rundenzeit, von der niemand weiß, was sie umfasst |
+| `unter_halbem_median` | kürzer als `sektor_schwelle` mal Median dieser Stelle; eine verpasste Splitüberfahrt hat Zeit in den Nachbarsektor verschoben. Der Median steht in der Auswertung |
+| `runde_unstimmig` | die Sektoren der Runde ergeben nicht ihre Rundenzeit |
+| `ausserhalb_einteilung` | die Stelle gehört nicht zur geltenden Einteilung |
+| `session_nicht_gewertet` | der `status` der Session schließt sie aus |
+
+### Eine Auswertung
+
+Je Strecke und Konfiguration: `strecke`, `konfiguration`, `layout_nr`
+(nummeriert, wenn eine Strecke mehrere Konfigurationen hat), `konfig_id`
+der geltenden Einteilung, `layout` (die geltenden Positionen, `null` ohne
+Einteilung) und `sessions_abweichend`. Darin je Fahrzeug — Sektoren
+verschiedener Fahrzeuge werden nie gemischt:
+
+| Feld | heißt |
+|---|---|
+| `sessions` | die gewerteten Sessions dieses Fahrzeugs |
+| `mediane` | je Sektor `median` und `grenze`, an denen `unter_halbem_median` gemessen wurde |
+| `aussortiert` | wie viele Sektorzeiten darunter lagen |
+| `bestrunde` | die schnellste zählende Runde, als Verweis |
+| `top_runden` | die drei schnellsten, als Verweise |
+| `streuung` | Mittel aus zweit- und drittbester minus Bestrunde |
+| `golden_lap` | Summe der Sektorbestzeiten über alle Sessions, mit `teile`: je Sektor die Runde, aus der er stammt, und ob sie eine `teilrunde` war |
+| `golden_lap_ohne_teilrunden` | dasselbe nur aus vollständigen Runden; `zeit` `null`, wenn zu einem Sektor keine vorliegt |
+| `delta` | Golden Lap minus Bestrunde |
+| `unglaubwuerdig` | Golden Lap mehr als fünfzehn Prozent unter der Bestrunde |
+| `je_turn`, `je_tag` | Bestrunde und theoretische Runde innerhalb einer Session bzw. eines Tages |
+
+Ein Verweis ist `{session, nr, zeit}`: die Kennung der Session und die
+Rundennummer darin.
+
+### Die CSV-Exporte
+
+Je Session eine Datei `<id>_bikemode.csv`, so wie racebox.pro sie im
+Browser exportiert: Zeitformat UTC, Geschwindigkeit in km/h, Höhe in
+Metern, Motorradmodus an, Zeilenende LF, UTF-8. Die Datei hat zwei Teile.
+
+**Der Kopfblock**, Zeile für Zeile `Schlüssel,Wert`:
+
+```
+Format,RaceBox CSV
+Data Source,RaceBox 1000000001
+Date UTC,2026-08-10T17:16:45+00:00
+Session Index,1
+Track,Talkurs
+Configuration,Grand Prix
+Laps,3
+Best Lap Time,89.500
+Lap 1, 16.000, sectors, 0,0,0,0,16.000
+Lap 2, 90.000, sectors, 30.000,25.000,20.000,0,15.000
+```
+
+Die Rundenzeilen führen nur abgeschlossene Runden. Die Zahl der
+Sektorfelder ist fest; unbenutzte stehen als `0`, auch mittendrin, und
+das letzte Feld ist immer das Stück vom letzten Splitpunkt ins Ziel. Wer
+die Zusammenfassung liest, braucht diese Zeilen nicht — dort stehen die
+Sektoren schon richtig nummeriert und beurteilt. Vorsicht bei `Time` im
+Kopf, falls vorhanden: Das ist UTC im 12-Stunden-Format, nicht die
+Startzeit.
+
+**Nach einer Leerzeile die Messpunkte**, eingeleitet von der
+Spaltenzeile:
+
+```
+Record,Time,Latitude,Longitude,Altitude,Speed,GForceX,GForceZ,Lap,LeanAngle,...
+1,2026-08-25T13:00:00.000Z,50.5,13.6,262.4,36.00,0.1,1.0,0,-4.4,...
+```
+
+Die Spalten werden über ihren Namen in dieser Zeile gefunden, nie über
+ihre Stelle. Golden Lap selbst liest nur `Record`, `Time`, `Latitude`,
+`Longitude`, `Speed` und `Lap`; was die übrigen bedeuten, ist nicht
+nachgemessen.
+
+| Spalte | heißt |
+|---|---|
+| `Record` | laufende Nummer des Messpunkts. Auf sie beziehen sich alle `record_von` und `record_bis` |
+| `Time` | Zeitpunkt in UTC, `2026-08-25T13:36:33.480Z` |
+| `Latitude`, `Longitude` | Position in Grad; `0/0` heißt kein Fix |
+| `Speed` | km/h, aus der Dopplerverschiebung gemessen — ruhiger als der Abstand zweier Positionen |
+| `Lap` | zu welcher Runde der Punkt gehört, die Nummer aus dem Kopfblock; `0` heißt zu keiner (Boxengasse, Ein- und Ausfahrt, Stehen) |
+
+Die Box misst mit 25 Hz. Setzt sie aus, fehlen Zeilen, und `Time` springt;
+ob `Record` dann ebenfalls springt, ist nicht nachgemessen. Eine Lücke
+also an `Time` erkennen, nicht an `Record`.
+
+**Zahlen immer mit Punkt als Dezimaltrennzeichen lesen**, nie über die
+Ländereinstellung des Rechners: Auf einem deutschen System wird aus
+`15.701` sonst 15701, und der Fehler fällt erst bei der Auswertung auf.
+
+## Was die Zusammenfassung im Cache braucht
+
+Zwei Dinge wusste der Cache vorher nicht, und beide ohne neuen Download:
+
+- **Die Grenzen je Runde und die verworfenen Messpunkte.**
+  `runden_aus_export` rechnete beides schon — die Grenzen für die Probe,
+  die Punkte für die Kilometer — und behielt nur Summen. Jetzt stehen sie
+  in `kennzahlen.runden_grenzen` und `kennzahlen.verworfene_punkte`;
+  `RUNDEN_VERSION` ist deshalb 4, und jeder Export wird einmal neu von der
+  Platte gelesen.
+- **Welche Randsektoren verworfen wurden**, in `randsektoren` je Runde.
+  Nur Runden aus dem JSON haben welche. `CACHE_VERSION` bleibt stehen — ein
+  neuer Download für Sessions, die meist gar nicht betroffen sind, wäre
+  teurer als die ehrliche Antwort `unbekannt`.
+
 ## Testen
 
 ```sh
 python3 selbsttest.py
 ```
 
-657 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
+710 Zusicherungen. Ein echter HTTP-Server auf 127.0.0.1 spielt racebox.pro
 — mit Anmeldung, Cookies, Blättern, Fahrzeugfilter und einem 5 MB großen
 Export. Geprüft wird beobachtbares Verhalten: welche Felder rausgehen, was
 im Cache landet, was bei Fehlern passiert.
@@ -292,7 +566,7 @@ Drei Dinge beim Ändern:
 - **Der Test biegt `BASIS` auf eine tote Adresse um.** Bleibt beim Ändern
   eine echte Adresse stehen, scheitert er, statt heimlich ins Netz zu gehen.
 - **Neue Prüfungen einmal absichtlich rot laufen lassen** — dafür gibt es
-  `python3 mutationen.py`. Es baut 161 Fehler ein, die ein Mensch wirklich
+  `python3 mutationen.py`. Es baut 184 Fehler ein, die ein Mensch wirklich
   machen könnte, und meldet jeden, der unbemerkt bleibt. Der volle Lauf
   kostet Minuten; gefiltert geht es schneller:
   `python3 mutationen.py statistik`, `-j 8` ändert die Nebenläufigkeit.
